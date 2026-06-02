@@ -204,6 +204,7 @@ let activeExecution: {
     status: 'running' | 'paused' | 'completed' | 'error',
     currentStepIndex: number,
     screenshot?: string,
+    currentUrl?: string,
     logs: string[]
 } | null = null;
 
@@ -221,6 +222,7 @@ app.post("/api/execute/:macroId", async (req, res) => {
       macroId,
       status: 'running',
       currentStepIndex: 0,
+      currentUrl: 'about:blank',
       logs: [`Started macro ${macro.name}`, `Empresas selecionadas (${targetCompanies.length}): ${companyNames}`]
   };
 
@@ -263,6 +265,10 @@ function simulateExecution(macro: any, startIndex = 0) {
         activeExecution.currentStepIndex = i;
         activeExecution.logs.push(`Executing step ${i+1}: ${step.type} - ${step.selector || step.value || ''}`);
 
+        if (step.type === 'navigate' && step.value) {
+           activeExecution.currentUrl = step.value;
+        }
+
         if (step.type === 'captcha_wait') {
             activeExecution.status = 'paused';
             activeExecution.logs.push("Paused. Waiting for manual captcha resolution.");
@@ -271,7 +277,7 @@ function simulateExecution(macro: any, startIndex = 0) {
             return; // Wait for user to call resolve-captcha
         }
 
-        let waitTimeMs = 1000;
+        let waitTimeMs = 1500;
         if (step.type === 'wait' && step.waitTime) waitTimeMs = step.waitTime * 1000;
 
         i++;
