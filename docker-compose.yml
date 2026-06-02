@@ -1,0 +1,42 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    container_name: autosync_rpa
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      # Connecting to the database service defined below
+      - DATABASE_URL=postgresql://postgres:senha123@db:5432/saf_db
+      - DATA_DIR=/data
+      - STORAGE_PATH=/data
+    volumes:
+      - app_data:/data
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: always
+
+  db:
+    image: postgres:15-alpine
+    container_name: autosync_db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: senha123
+      POSTGRES_DB: saf_db
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d saf_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: always
+
+volumes:
+  pg_data:
+  app_data:
