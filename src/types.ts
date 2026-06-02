@@ -34,6 +34,16 @@ export interface MacroStep {
   waitTime?: number;
 }
 
+export interface DownloadedFile {
+  id: string;
+  filename: string;
+  size: number;
+  createdAt: string;
+  companyId?: string;
+  macroId?: string;
+  path: string;
+}
+
 export interface Macro {
   id: string;
   name: string;
