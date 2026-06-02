@@ -2,7 +2,7 @@ import express from "express";
 import path from "path";
 import cors from "cors";
 import { createServer as createViteServer } from "vite";
-import { db } from "./server/db";
+import { db, initDB } from "./server/db";
 import multer from "multer";
 import { v4 as uuidv4 } from "uuid";
 // @ts-ignore
@@ -19,54 +19,54 @@ const upload = multer({ storage: multer.memoryStorage() });
 // --- API ROUTES ---
 
 // Companies
-app.get("/api/companies", (req, res) => {
-  res.json(db.getCompanies());
+app.get("/api/companies", async (req, res) => {
+  res.json(await db.getCompanies());
 });
 
-app.post("/api/companies", (req, res) => {
+app.post("/api/companies", async (req, res) => {
   const company = { ...req.body, id: uuidv4() };
-  db.addCompany(company);
+  await db.addCompany(company);
   res.json(company);
 });
 
-app.put("/api/companies/:id", (req, res) => {
-  db.updateCompany(req.params.id, req.body);
+app.put("/api/companies/:id", async (req, res) => {
+  await db.updateCompany(req.params.id, req.body);
   res.json({ success: true });
 });
 
-app.delete("/api/companies/:id", (req, res) => {
-  db.deleteCompany(req.params.id);
+app.delete("/api/companies/:id", async (req, res) => {
+  await db.deleteCompany(req.params.id);
   res.json({ success: true });
 });
 
 // Macros
-app.get("/api/macros", (req, res) => {
-  res.json(db.getMacros());
+app.get("/api/macros", async (req, res) => {
+  res.json(await db.getMacros());
 });
 
-app.post("/api/macros", (req, res) => {
+app.post("/api/macros", async (req, res) => {
   const macro = { ...req.body, id: uuidv4() };
   if (!macro.steps) macro.steps = [];
-  db.addMacro(macro);
+  await db.addMacro(macro);
   res.json(macro);
 });
 
-app.put("/api/macros/:id", (req, res) => {
-  db.updateMacro(req.params.id, req.body);
+app.put("/api/macros/:id", async (req, res) => {
+  await db.updateMacro(req.params.id, req.body);
   res.json({ success: true });
 });
 
-app.delete("/api/macros/:id", (req, res) => {
-  db.deleteMacro(req.params.id);
+app.delete("/api/macros/:id", async (req, res) => {
+  await db.deleteMacro(req.params.id);
   res.json({ success: true });
 });
 
 // Certificates
-app.get("/api/certificates", (req, res) => {
-  res.json(db.getCertificates());
+app.get("/api/certificates", async (req, res) => {
+  res.json(await db.getCertificates());
 });
 
-app.post("/api/certificates/upload", upload.single("pfx"), (req, res) => {
+app.post("/api/certificates/upload", upload.single("pfx"), async (req, res) => {
   try {
     const file = req.file;
     const password = req.body.password;
@@ -130,7 +130,7 @@ app.post("/api/certificates/upload", upload.single("pfx"), (req, res) => {
       type: type as "PF" | "PJ"
     };
 
-    db.addCertificate(certificate);
+    await db.addCertificate(certificate);
 
     res.json(certificate);
 
@@ -140,8 +140,8 @@ app.post("/api/certificates/upload", upload.single("pfx"), (req, res) => {
   }
 });
 
-app.delete("/api/certificates/:id", (req, res) => {
-  db.deleteCertificate(req.params.id);
+app.delete("/api/certificates/:id", async (req, res) => {
+  await db.deleteCertificate(req.params.id);
   res.json({ success: true });
 });
 
@@ -155,9 +155,9 @@ let activeExecution: {
     logs: string[]
 } | null = null;
 
-app.post("/api/execute/:macroId", (req, res) => {
+app.post("/api/execute/:macroId", async (req, res) => {
   const macroId = req.params.macroId;
-  const macro = db.getMacro(macroId);
+  const macro = await db.getMacro(macroId);
   if (!macro) return res.status(404).json({ error: "Macro not found" });
 
   activeExecution = {
@@ -167,8 +167,6 @@ app.post("/api/execute/:macroId", (req, res) => {
       logs: [`Started macro ${macro.name}`]
   };
 
-  // Here we would actually spawn Puppeteer and run the macro steps.
-  // We'll mock the progression for the prototype format.
   simulateExecution(macro);
 
   res.json({ success: true, execution: activeExecution });
@@ -178,13 +176,12 @@ app.get("/api/execution", (req, res) => {
   res.json(activeExecution);
 });
 
-app.post("/api/execution/resolve-captcha", (req, res) => {
+app.post("/api/execution/resolve-captcha", async (req, res) => {
   if (activeExecution && activeExecution.status === 'paused') {
     activeExecution.logs.push(`Captcha resolved with: ${req.body.text}`);
     activeExecution.status = 'running';
-    // Resume simulation
     activeExecution.currentStepIndex++;
-    const macro = db.getMacro(activeExecution.macroId);
+    const macro = await db.getMacro(activeExecution.macroId);
     if (macro) {
         simulateExecution(macro, activeExecution.currentStepIndex);
     }
@@ -228,8 +225,43 @@ function simulateExecution(macro: any, startIndex = 0) {
 }
 
 
+// --- PROXY ROUTE FOR RECORDING SIMULATOR ---
+app.get("/api/proxy", async (req, res) => {
+  const targetUrl = req.query.url as string;
+  if (!targetUrl) return res.status(400).send("No URL");
+  try {
+    const response = await fetch(targetUrl);
+    let html = await response.text();
+    
+    // Inject click interception script
+    const script = `
+    <script>
+      document.addEventListener('click', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        var target = e.target;
+        var selector = target.tagName.toLowerCase();
+        if (target.id) {
+          selector += '#' + target.id;
+        } else if (target.className && typeof target.className === 'string') {
+          selector += '.' + target.className.split(' ').join('.');
+        }
+        window.parent.postMessage({ type: 'recorder_click', selector: selector }, '*');
+      }, true);
+    </script>
+    <base href="${targetUrl}">
+    `;
+    html = html.replace('<head>', '<head>' + script);
+    res.send(html);
+  } catch (e: any) {
+    res.status(500).send("Error proxying: " + e.message);
+  }
+});
+
 // --- FRONTEND ROUTES ---
 async function startServer() {
+  await initDB();
+
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },

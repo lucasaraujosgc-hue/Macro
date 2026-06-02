@@ -6,9 +6,21 @@ import { v4 as uuidv4 } from "uuid";
 export default function Macros() {
   const [macros, setMacros] = useState<Macro[]>([]);
   const [editingMacro, setEditingMacro] = useState<Macro | null>(null);
+  const [proxyUrlInput, setProxyUrlInput] = useState("https://example.com");
+  const [activeProxyUrl, setActiveProxyUrl] = useState("");
 
   const loadMacros = () => fetch("/api/macros").then(r => r.json()).then(setMacros);
   useEffect(() => { loadMacros(); }, []);
+
+  useEffect(() => {
+    const handler = (event: MessageEvent) => {
+      if (event.data?.type === 'recorder_click' && editingMacro) {
+        addStep('click', { selector: event.data.selector });
+      }
+    };
+    window.addEventListener("message", handler);
+    return () => window.removeEventListener("message", handler);
+  }, [editingMacro]);
 
   const handleSave = async () => {
     if(!editingMacro) return;
@@ -31,11 +43,13 @@ export default function Macros() {
     loadMacros();
   };
 
-  const addStep = (type: MacroStepType) => {
-    if(!editingMacro) return;
-    setEditingMacro({
-      ...editingMacro,
-      steps: [...editingMacro.steps, { id: uuidv4(), type }]
+  const addStep = (type: MacroStepType, data: Partial<MacroStep> = {}) => {
+    setEditingMacro(prev => {
+      if(!prev) return prev;
+      return {
+        ...prev,
+        steps: [...prev.steps, { id: uuidv4(), type, ...data }]
+      };
     });
   };
 
@@ -82,13 +96,14 @@ export default function Macros() {
           </div>
         </div>
 
-        <div className="flex gap-6">
-          <div className="w-64 space-y-2 flex-shrink-0">
+        <div className="flex flex-col xl:flex-row gap-6">
+          <div className="w-full xl:w-64 space-y-2 flex-shrink-0">
             <h3 className="font-semibold text-slate-400 mb-4 text-xs uppercase tracking-wider px-1">Adicionar Ação</h3>
             <button onClick={()=>addStep('navigate')} className="w-full text-left px-4 py-3 bg-white/5 border border-white/10 rounded-lg hover:border-indigo-400 hover:bg-indigo-500/10 text-sm font-medium text-slate-200 transition-all">🌐 Navegar para URL</button>
             <button onClick={()=>addStep('click')} className="w-full text-left px-4 py-3 bg-white/5 border border-white/10 rounded-lg hover:border-indigo-400 hover:bg-indigo-500/10 text-sm font-medium text-slate-200 transition-all">🖱️ Clicar em Elemento</button>
             <button onClick={()=>addStep('type')} className="w-full text-left px-4 py-3 bg-white/5 border border-white/10 rounded-lg hover:border-indigo-400 hover:bg-indigo-500/10 text-sm font-medium text-slate-200 transition-all">⌨️ Digitar Texto / Var</button>
             <button onClick={()=>addStep('wait')} className="w-full text-left px-4 py-3 bg-white/5 border border-white/10 rounded-lg hover:border-indigo-400 hover:bg-indigo-500/10 text-sm font-medium text-slate-200 transition-all">⏳ Pausa (Seg)</button>
+            <button onClick={()=>addStep('install_cert')} className="w-full text-left px-4 py-3 bg-white/5 border border-white/10 rounded-lg hover:border-purple-400 hover:bg-purple-500/10 text-sm font-medium text-slate-200 transition-all">🔐 Selecionar Certificado</button>
             <button onClick={()=>addStep('captcha_wait')} className="w-full text-left px-4 py-3 bg-amber-500/10 text-amber-400 border border-amber-500/30 rounded-lg hover:border-amber-400 hover:bg-amber-500/20 text-sm font-medium transition-all shadow-lg shadow-amber-500/5">🤖 Captcha Manual</button>
           </div>
 
@@ -121,8 +136,13 @@ export default function Macros() {
                   {step.type === 'type' && (
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                       <input type="text" placeholder="Seletor CSS" value={step.selector || ''} onChange={e => updateStep(step.id, {selector: e.target.value})} className="text-sm bg-black/20 border-white/10 text-indigo-300 placeholder-slate-600 rounded-lg border px-3 py-2 font-mono outline-none focus:border-indigo-500"/>
-                      <input type="text" placeholder="Texto ou Variável (ex: {empresa.cnpj})" value={step.value || ''} onChange={e => updateStep(step.id, {value: e.target.value})} className="text-sm bg-black/20 border-white/10 text-white placeholder-slate-600 rounded-lg border px-3 py-2 outline-none focus:border-indigo-500"/>
+                      <input type="text" placeholder="Constante ou Var (ex: {{CNPJ}}, {{RAZAO_SOCIAL}})" value={step.value || ''} onChange={e => updateStep(step.id, {value: e.target.value})} className="text-sm bg-black/20 border-white/10 text-white placeholder-slate-600 rounded-lg border px-3 py-2 outline-none focus:border-indigo-500"/>
                     </div>
+                  )}
+                  {step.type === 'install_cert' && (
+                    <p className="text-xs text-purple-400 bg-purple-500/10 border border-purple-500/20 px-3 py-2 rounded-lg">
+                      Seleciona virtualmente o certificado digital correspondente (A1 ou Pin do A3) da empresa em execução.
+                    </p>
                   )}
                   {step.type === 'wait' && (
                     <div className="flex items-center">
@@ -137,6 +157,50 @@ export default function Macros() {
                 </div>
               </div>
             ))}
+          </div>
+
+          <div className="flex-1 space-y-3 min-w-[400px]">
+            <h3 className="font-semibold text-slate-400 mb-4 text-xs uppercase tracking-wider px-1">Simulador Web (Gravação)</h3>
+            <div className="backdrop-blur-md bg-white/5 p-4 rounded-xl border border-white/10 shadow-xl shadow-black/10 flex flex-col h-[600px]">
+              <div className="flex space-x-2 mb-3">
+                <input 
+                  type="text" 
+                  value={proxyUrlInput} 
+                  onChange={e => setProxyUrlInput(e.target.value)} 
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') {
+                       setActiveProxyUrl(proxyUrlInput);
+                       addStep('navigate', { value: proxyUrlInput });
+                    }
+                  }}
+                  className="flex-1 text-sm bg-black/20 border-white/10 text-white placeholder-slate-600 rounded-lg border px-3 py-2 outline-none focus:border-indigo-500"
+                  placeholder="https://exemplo.com.br" 
+                />
+                <button 
+                  onClick={() => {
+                    setActiveProxyUrl(proxyUrlInput);
+                    addStep('navigate', { value: proxyUrlInput });
+                  }}
+                  className="px-3 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm font-semibold transition-all">
+                  Ir
+                </button>
+              </div>
+              <div className="flex-1 bg-white rounded-lg overflow-hidden border border-white/20 relative">
+                {!activeProxyUrl ? (
+                  <div className="absolute inset-0 flex items-center justify-center text-slate-400 flex-col">
+                    <p className="text-sm font-medium">Nenhuma URL Carregada</p>
+                    <p className="text-xs text-slate-500 mt-2">Navegue para capturar elementos com apenas um clique</p>
+                  </div>
+                ) : (
+                  <iframe 
+                    src={`/api/proxy?url=${encodeURIComponent(activeProxyUrl)}`} 
+                    className="w-full h-full border-none"
+                    sandbox="allow-scripts allow-same-origin allow-forms"
+                    title="Simulador de Gravação"
+                  />
+                )}
+              </div>
+            </div>
           </div>
         </div>
       </div>
