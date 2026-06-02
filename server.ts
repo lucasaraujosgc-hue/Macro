@@ -230,15 +230,27 @@ app.get("/api/proxy", async (req, res) => {
   const targetUrl = req.query.url as string;
   if (!targetUrl) return res.status(400).send("No URL");
   try {
-    const response = await fetch(targetUrl);
+    const response = await fetch(targetUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+      }
+    });
+
+    const contentType = response.headers.get("content-type") || "";
+    if (!contentType.includes("text/html")) {
+      const buffer = await response.arrayBuffer();
+      res.setHeader("Content-Type", contentType);
+      return res.send(Buffer.from(buffer));
+    }
+
     let html = await response.text();
     
     // Inject click interception script
     const script = `
     <script>
       document.addEventListener('click', function(e) {
-        e.preventDefault();
-        e.stopPropagation();
         var target = e.target;
         var selector = target.tagName.toLowerCase();
         if (target.id) {
@@ -247,14 +259,72 @@ app.get("/api/proxy", async (req, res) => {
           selector += '.' + target.className.split(' ').join('.');
         }
         window.parent.postMessage({ type: 'recorder_click', selector: selector }, '*');
+
+        var a = target.closest('a');
+        if (a && a.href && !a.href.startsWith('javascript:')) {
+            e.preventDefault();
+            e.stopPropagation();
+            window.parent.postMessage({ type: 'recorder_navigate', url: a.href }, '*');
+        }
+      }, true);
+
+      document.addEventListener('submit', function(e) {
+         e.preventDefault();
+         const action = e.target.action || window.location.href;
+         window.parent.postMessage({ type: 'recorder_navigate', url: action }, '*');
       }, true);
     </script>
     <base href="${targetUrl}">
     `;
-    html = html.replace('<head>', '<head>' + script);
+    
+    if (html.toLowerCase().includes('<head>')) {
+      html = html.replace(/<head>/i, '<head>' + script);
+    } else {
+      html = script + html;
+    }
+    
     res.send(html);
   } catch (e: any) {
-    res.status(500).send("Error proxying: " + e.message);
+    let isCertError = false;
+    const msg = e.message ? e.message.toLowerCase() : "";
+    if (msg.includes("certificate") || msg.includes("ssl") || msg.includes("tls") || msg.includes("econnreset")) {
+      isCertError = true;
+    }
+    if (e.cause && typeof e.cause.code === 'string') {
+      const code = e.cause.code.toUpperCase();
+      if (['ERR_TLS_CERT_ALTNAME_INVALID', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'CERT_HAS_EXPIRED', 'ECONNRESET'].includes(code)) {
+        isCertError = true;
+      }
+    }
+
+    if (isCertError) {
+      res.send(`
+        <html>
+        <body>
+            <div style="padding: 20px; font-family: sans-serif; text-align: center; color: white; background: #1e1e2f; border-radius: 8px;">
+                <h2>⚠️ Certificado Digital Solicitado</h2>
+                <p>O site destino requer autenticação via Certificado Digital (A1/A3) ou ocorreu um erro de SSL.</p>
+                <p>Ação 'Selecionar Certificado' foi registrada na automação.</p>
+                <script>
+                    window.parent.postMessage({ type: 'recorder_cert_request' }, '*');
+                </script>
+            </div>
+        </body>
+        </html>
+      `);
+    } else {
+      res.send(`
+        <html>
+        <body>
+            <div style="padding: 20px; font-family: sans-serif; color: #ff6b6b; background: #2d1b1b; border-radius: 8px;">
+                <h2>❌ Erro ao Carregar Site (Proxy)</h2>
+                <p>${e.message}</p>
+                <p>Alguns sites bloqueiam acessos automatizados (CORS, Cloudflare, etc). Recomendamos usar a extensão do navegador em produção.</p>
+            </div>
+        </body>
+        </html>
+      `);
+    }
   }
 });
 

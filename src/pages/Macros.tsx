@@ -14,8 +14,22 @@ export default function Macros() {
 
   useEffect(() => {
     const handler = (event: MessageEvent) => {
-      if (event.data?.type === 'recorder_click' && editingMacro) {
+      // Must check for event.data existence to avoid errors on generic postMessages
+      if (!event.data || typeof event.data !== 'object') return;
+      
+      // If we aren't editing, we still might want to capture, but the handler logic uses editingMacro.
+      // Wait, since we are using functional state update in addStep, we can actually just call it if editingMacro is set.
+      if (!editingMacro) return;
+
+      if (event.data.type === 'recorder_click') {
         addStep('click', { selector: event.data.selector });
+      } else if (event.data.type === 'recorder_navigate') {
+        const url = event.data.url;
+        setProxyUrlInput(url);
+        setActiveProxyUrl(url);
+        addStep('navigate', { value: url });
+      } else if (event.data.type === 'recorder_cert_request') {
+        addStep('install_cert');
       }
     };
     window.addEventListener("message", handler);
