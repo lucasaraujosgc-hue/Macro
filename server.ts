@@ -1,3 +1,5 @@
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+
 import express from "express";
 import path from "path";
 import cors from "cors";
@@ -157,14 +159,19 @@ let activeExecution: {
 
 app.post("/api/execute/:macroId", async (req, res) => {
   const macroId = req.params.macroId;
+  const companyIds = req.body.companyIds || [];
   const macro = await db.getMacro(macroId);
   if (!macro) return res.status(404).json({ error: "Macro not found" });
+
+  const companies = await db.getCompanies();
+  const targetCompanies = companies.filter(c => companyIds.includes(c.id));
+  const companyNames = targetCompanies.map(c => c.razaoSocial).join(", ");
 
   activeExecution = {
       macroId,
       status: 'running',
       currentStepIndex: 0,
-      logs: [`Started macro ${macro.name}`]
+      logs: [`Started macro ${macro.name}`, `Empresas selecionadas (${targetCompanies.length}): ${companyNames}`]
   };
 
   simulateExecution(macro);
@@ -247,6 +254,11 @@ app.get("/api/proxy", async (req, res) => {
 
     let html = await response.text();
     
+    // Fix relative paths for src/href to make CSS/JS work when proxied
+    const originUrl = new URL('/', targetUrl).origin;
+    html = html.replace(/(src|href)="\/([^"]*)"/gi, `$1="${originUrl}/$2"`);
+    html = html.replace(/(src|href)='\/([^']*)'/gi, `$1='${originUrl}/$2'`);
+
     // Inject click interception script
     const script = `
     <script>

@@ -1,16 +1,24 @@
 import { useEffect, useState } from "react";
-import { Macro, MacroStep, MacroStepType } from "@/types";
+import { Macro, MacroStep, MacroStepType, Company } from "@/types";
 import { Plus, Trash2, Edit2, Play, Save, ChevronRight, GripVertical } from "lucide-react";
 import { v4 as uuidv4 } from "uuid";
 
 export default function Macros() {
   const [macros, setMacros] = useState<Macro[]>([]);
+  const [companies, setCompanies] = useState<Company[]>([]);
   const [editingMacro, setEditingMacro] = useState<Macro | null>(null);
   const [proxyUrlInput, setProxyUrlInput] = useState("https://example.com");
   const [activeProxyUrl, setActiveProxyUrl] = useState("");
+  const [selectedRunMacroId, setSelectedRunMacroId] = useState<string | null>(null);
+  const [selectedCompaniesForRun, setSelectedCompaniesForRun] = useState<string[]>([]);
 
   const loadMacros = () => fetch("/api/macros").then(r => r.json()).then(setMacros);
-  useEffect(() => { loadMacros(); }, []);
+  const loadCompanies = () => fetch("/api/companies").then(r => r.json()).then(setCompanies);
+  
+  useEffect(() => { 
+    loadMacros(); 
+    loadCompanies();
+  }, []);
 
   useEffect(() => {
     const handler = (event: MessageEvent) => {
@@ -89,8 +97,19 @@ export default function Macros() {
     loadMacros();
   }
 
-  const startExecution = async (id: string) => {
-    await fetch(`/api/execute/${id}`, { method: "POST" });
+  const openRunModal = (id: string) => {
+    setSelectedRunMacroId(id);
+    setSelectedCompaniesForRun([]);
+  }
+
+  const executeSelected = async () => {
+    if (!selectedRunMacroId || selectedCompaniesForRun.length === 0) return;
+    await fetch(`/api/execute/${selectedRunMacroId}`, { 
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ companyIds: selectedCompaniesForRun })
+    });
+    setSelectedRunMacroId(null);
     window.location.hash = "#/execution";
   }
 
@@ -239,7 +258,7 @@ export default function Macros() {
                 <p className="text-[11px] font-mono text-indigo-400 bg-indigo-500/10 px-2 py-0.5 rounded border border-indigo-500/20 inline-block">{m.steps.length} PASSOS</p>
               </div>
               <div className="flex space-x-2 items-center">
-                <button onClick={() => startExecution(m.id)} className="flex items-center px-3 py-1.5 bg-green-500/20 text-green-400 border border-green-500/30 hover:bg-green-500/30 rounded-lg text-xs font-bold uppercase tracking-wider mr-4 shadow-lg shadow-green-500/10 transition-all">
+                <button onClick={() => openRunModal(m.id)} className="flex items-center px-3 py-1.5 bg-green-500/20 text-green-400 border border-green-500/30 hover:bg-green-500/30 rounded-lg text-xs font-bold uppercase tracking-wider mr-4 shadow-lg shadow-green-500/10 transition-all">
                   <Play className="h-3 w-3 mr-1.5" /> Executar
                 </button>
                 <button onClick={() => setEditingMacro(m)} className="text-slate-400 hover:text-indigo-400 p-2 bg-white/5 hover:bg-white/10 border border-transparent hover:border-white/10 rounded-md transition-colors"><Edit2 className="h-4 w-4" /></button>
@@ -250,6 +269,44 @@ export default function Macros() {
           {macros.length === 0 && <li className="p-8 text-center text-slate-500 text-sm">Nenhuma automação configurada.</li>}
         </ul>
       </div>
+
+      {selectedRunMacroId && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-[#020617] border border-white/10 rounded-xl max-w-lg w-full p-6 shadow-2xl relative overflow-hidden">
+            <div className="absolute top-0 inset-x-0 h-1 bg-gradient-to-r from-blue-500 to-indigo-500"></div>
+            <h3 className="text-lg font-bold text-white mb-4">Selecionar Empresas</h3>
+            <p className="text-xs text-slate-400 mb-6">Selecione as empresas para as quais deseja executar esta automação.</p>
+            
+            <div className="max-h-60 overflow-y-auto space-y-2 mb-6">
+              {companies.map(c => (
+                <label key={c.id} className="flex items-center space-x-4 p-3 bg-white/5 rounded-lg border border-white/5 cursor-pointer hover:bg-white/10 transition">
+                  <input type="checkbox" className="form-checkbox h-4 w-4 rounded border-white/20 bg-black/20 text-indigo-500 focus:ring-indigo-500" 
+                    checked={selectedCompaniesForRun.includes(c.id)}
+                    onChange={(e) => {
+                      if (e.target.checked) setSelectedCompaniesForRun([...selectedCompaniesForRun, c.id]);
+                      else setSelectedCompaniesForRun(selectedCompaniesForRun.filter(id => id !== c.id));
+                    }}
+                  />
+                  <div>
+                    <div className="text-sm font-bold text-white">{c.razaoSocial}</div>
+                    <div className="text-xs font-mono text-slate-400 mt-0.5">{c.cnpj}</div>
+                  </div>
+                </label>
+              ))}
+              {companies.length === 0 && (
+                <p className="text-center text-slate-500 text-sm py-4">Nenhuma empresa encontrada.</p>
+              )}
+            </div>
+            
+            <div className="flex justify-end space-x-3">
+              <button onClick={() => setSelectedRunMacroId(null)} className="px-4 py-2 rounded-lg text-sm font-medium text-slate-300 hover:bg-white/10 border border-transparent transition-colors">Cancelar</button>
+              <button onClick={executeSelected} disabled={selectedCompaniesForRun.length === 0} className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-lg text-sm font-semibold shadow-lg shadow-indigo-500/20 transition-all border border-transparent">
+                Iniciar Execução
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
