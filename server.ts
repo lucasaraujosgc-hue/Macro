@@ -15,6 +15,7 @@ const PORT = 3000;
 
 app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 // --- ASSET PROXY MIDDLEWARE ---
 // Catches assets that escaped the proxy prefix (e.g. absolute paths like /fonts/font.woff loaded from CSS)
@@ -346,17 +347,23 @@ app.all("/api/proxy/raw/*", async (req, res) => {
 });
 
 // 2. HTML Injector
-app.get("/api/proxy", async (req, res) => {
+app.all("/api/proxy", async (req, res) => {
   const targetUrl = req.query.url as string;
   if (!targetUrl) return res.status(400).send("No URL");
   try {
-    const response = await fetch(targetUrl, {
+    const fetchOptions: RequestInit = {
+      method: req.method,
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
         'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
-      }
-    });
+        ...(req.method === 'POST' && { 'Content-Type': 'application/x-www-form-urlencoded' }),
+      },
+      ...(req.method === 'POST' && req.body && { body: new URLSearchParams(req.body as Record<string, string>).toString() }),
+      redirect: 'follow',
+    };
+
+    const response = await fetch(targetUrl, fetchOptions);
 
     res.setHeader("Access-Control-Allow-Origin", "*");
 
@@ -434,6 +441,25 @@ app.get("/api/proxy", async (req, res) => {
           }
           return originalXHR.call(this, method, url, ...rest);
       };
+
+      document.addEventListener('submit', function(e) {
+         e.preventDefault();
+         const form = e.target;
+         const action = form.action.startsWith('http') 
+           ? form.action 
+           : new URL(form.action, document.baseURI).href;
+         const method = (form.method || 'GET').toUpperCase();
+         
+         const formData = new FormData(form);
+         const body = new URLSearchParams(formData).toString();
+         
+         window.parent.postMessage({ 
+           type: 'recorder_navigate', 
+           url: action,
+           method: method,
+           body: body
+         }, '*');
+      }, true);
 
       document.addEventListener('click', function(e) {
         var target = e.target;
