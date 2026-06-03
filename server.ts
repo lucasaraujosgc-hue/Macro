@@ -296,6 +296,7 @@ app.all("/api/proxy/raw/*", async (req, res) => {
     if (!targetUrl.startsWith("http")) return res.status(400).send("Invalid URL");
     
     try {
+        console.log(`[Proxy Fetch] ${req.method} ${targetUrl}`);
         const response = await fetch(targetUrl, {
           method: req.method,
           headers: {
@@ -305,10 +306,25 @@ app.all("/api/proxy/raw/*", async (req, res) => {
         
         res.setHeader("Access-Control-Allow-Origin", "*");
         response.headers.forEach((value, key) => {
-            if (['content-type', 'content-length', 'cache-control'].includes(key.toLowerCase())) {
+            const lowerKey = key.toLowerCase();
+            if (lowerKey === 'set-cookie') {
+                // Ensure cookies work in iframe via SameSite=None
+                const cookies = response.headers.getSetCookie();
+                cookies.forEach(cookie => {
+                    let newCookie = cookie.replace(/SameSite=Strict/gi, 'SameSite=None')
+                                           .replace(/SameSite=Lax/gi, 'SameSite=None');
+                    if (!newCookie.toLowerCase().includes('samesite=none')) {
+                        newCookie += '; SameSite=None; Secure';
+                    }
+                    res.append('Set-Cookie', newCookie);
+                    console.log(`[Proxy Cookie] ${newCookie.split('=')[0]} preserved`);
+                });
+            } else if (['content-type', 'content-length', 'cache-control', 'location'].includes(lowerKey)) {
                 res.setHeader(key, value);
             }
         });
+
+        // Do not set Content-Security-Policy or X-Frame-Options to allow iframe usage
 
         const contentType = response.headers.get("content-type") || "";
         
@@ -333,10 +349,22 @@ app.all("/api/proxy/raw/*", async (req, res) => {
             });
             res.setHeader("Content-Length", Buffer.byteLength(css));
             return res.send(css);
-        } else if (contentType.includes("application/javascript") || contentType.includes("text/javascript")) {
+        } else if (contentType.includes("javascript") || contentType.includes("ecmascript") || targetUrl.includes(".js")) {
              let js = await response.text();
              res.setHeader("Content-Length", Buffer.byteLength(js));
+             res.setHeader("Content-Type", "application/javascript");
              return res.send(js);
+        } else if (contentType.includes("image/svg+xml")) {
+             let svg = await response.text();
+             // Some naive SVG relative rewrites if needed
+             svg = svg.replace(/(href|src)=["']([^"']+)["']/gi, (match, attr, url) => {
+                 if (url.startsWith("data:") || url.startsWith("#")) return match;
+                 if (url.startsWith("http")) return `${attr}="/api/proxy/raw/${url}"`;
+                 const absoluteUrl = new URL(url, targetUrl).href;
+                 return `${attr}="/api/proxy/raw/${absoluteUrl}"`;
+             });
+             res.setHeader("Content-Length", Buffer.byteLength(svg));
+             return res.send(svg);
         }
         
         const buffer = await response.arrayBuffer();
@@ -350,6 +378,27 @@ app.all("/api/proxy/raw/*", async (req, res) => {
 app.all("/api/proxy", async (req, res) => {
   const targetUrl = req.query.url as string;
   if (!targetUrl) return res.status(400).send("No URL");
+
+  // Fallback Mode 3 - Automatic Playwright detection for complex sites
+  if (targetUrl.includes("gov.br") || targetUrl.includes("receita.fazenda") || targetUrl.includes("cav.receita") || targetUrl.includes("sefaz")) {
+      return res.send(`
+         <html>
+         <body>
+             <div style="padding: 20px; font-family: sans-serif; text-align: center; color: white; background: #1e1e2f; border-radius: 8px;">
+                 <h2>⚠️ Sessão Segura Necessária (Playwright)</h2>
+                 <p>Sites governamentais e sistemas com certificado digital requerem um ambiente remoto avançado.</p>
+                 <p>Iniciando container Playwright isolado...</p>
+                 <script>
+                     setTimeout(function() {
+                        window.parent.postMessage({ type: 'recorder_requires_playwright', url: '${targetUrl}' }, '*');
+                     }, 1500);
+                 </script>
+             </div>
+         </body>
+         </html>
+      `);
+  }
+
   try {
     const fetchOptions: RequestInit = {
       method: req.method,
@@ -366,6 +415,30 @@ app.all("/api/proxy", async (req, res) => {
     const response = await fetch(targetUrl, fetchOptions);
 
     res.setHeader("Access-Control-Allow-Origin", "*");
+    
+    // Cookie rewrite
+    const cookies = response.headers.getSetCookie();
+    cookies.forEach(cookie => {
+        let newCookie = cookie.replace(/SameSite=Strict/gi, 'SameSite=None')
+                               .replace(/SameSite=Lax/gi, 'SameSite=None');
+        if (!newCookie.toLowerCase().includes('samesite=none')) {
+            newCookie += '; SameSite=None; Secure';
+        }
+        res.append('Set-Cookie', newCookie);
+    });
+
+    response.headers.forEach((value, key) => {
+        const lowerKey = key.toLowerCase();
+        if (['location'].includes(lowerKey)) {
+            // Rewrite location redirects
+             if (value.startsWith("http")) {
+                 res.setHeader(key, `/api/proxy?url=${encodeURIComponent(value)}`);
+             } else {
+                 const absoluteUrl = new URL(value, targetUrl).href;
+                 res.setHeader(key, `/api/proxy?url=${encodeURIComponent(absoluteUrl)}`);
+             }
+        }
+    });
 
     const contentType = response.headers.get("content-type") || "";
     if (!contentType.includes("text/html")) {
@@ -379,20 +452,35 @@ app.all("/api/proxy", async (req, res) => {
     // Replace absolute paths (/something) in HTML to force them into the proxy prefix.
     try {
       const origin = new URL(targetUrl).origin;
-      html = html.replace(/(src|href)="(\/[^"]*)"/gi, `$1="/api/proxy/raw/${origin}$2"`);
-      html = html.replace(/(src|href)='(\/[^']*)'/gi, `$1='/api/proxy/raw/${origin}$2'`);
+      html = html.replace(/(src|href|action|data-src|data-href)="(\/[^"]*)"/gi, `$1="/api/proxy/raw/${origin}$2"`);
+      html = html.replace(/(src|href|action|data-src|data-href)='(\/[^']*)'/gi, `$1='/api/proxy/raw/${origin}$2'`);
+      
+      // Rewrite srcset
+      html = html.replace(/srcset="([^"]+)"/gi, (match, val) => {
+         const parts = val.split(',').map((p: string) => {
+             const [url, size] = p.trim().split(/\s+/);
+             if (!url) return '';
+             if (url.startsWith('http://') || url.startsWith('https://')) {
+                 return `/api/proxy/raw/${url} ${size || ''}`.trim();
+             } else if (url.startsWith('/')) {
+                 return `/api/proxy/raw/${origin}${url} ${size || ''}`.trim();
+             }
+             return `${url} ${size || ''}`.trim();
+         });
+         return `srcset="${parts.join(', ')}"`;
+      });
     } catch (e) {
       // Ignored
     }
 
     // Rewrite absolute HTTP/HTTPS links so they use our proxy
-    html = html.replace(/(src|href)="([^"]*)"/gi, (match, attr, val) => {
+    html = html.replace(/(src|href|action|data-src|data-href)="([^"]*)"/gi, (match, attr, val) => {
       if (val.startsWith("http://") || val.startsWith("https://")) {
         return `${attr}="/api/proxy?url=${encodeURIComponent(val)}"`;
       }
       return match;
     });
-    html = html.replace(/(src|href)='([^']*)'/gi, (match, attr, val) => {
+    html = html.replace(/(src|href|action|data-src|data-href)='([^']*)'/gi, (match, attr, val) => {
       if (val.startsWith("http://") || val.startsWith("https://")) {
         return `${attr}='/api/proxy?url=${encodeURIComponent(val)}'`;
       }
@@ -402,88 +490,155 @@ app.all("/api/proxy", async (req, res) => {
     // Inject click interception script
     const script = `
     <script>
-      // Intercept dynamic script/link injections to proxy them
-      const originalAppendChild = Element.prototype.appendChild;
-      Element.prototype.appendChild = function(child) {
-         if (child.tagName === 'SCRIPT' && child.src && (child.src.startsWith('http://') || child.src.startsWith('https://'))) {
-            const url = new URL(child.src);
-            if (url.origin !== window.location.origin) {
-                child.src = '/api/proxy/raw/' + child.src;
+      (function() {
+        if (window.__proxyPatched) return;
+        window.__proxyPatched = true;
+
+        // Intercept dynamic script/link injections to proxy them
+        const originalAppendChild = Element.prototype.appendChild;
+        Element.prototype.appendChild = function(child) {
+           if (child && child.tagName) {
+               if (child.tagName === 'SCRIPT' && child.src && (child.src.startsWith('http://') || child.src.startsWith('https://'))) {
+                  const url = new URL(child.src, window.location.href);
+                  if (url.origin !== window.location.origin) {
+                      child.src = '/api/proxy/raw/' + child.src;
+                  }
+               }
+               if (child.tagName === 'LINK' && child.href && (child.href.startsWith('http://') || child.href.startsWith('https://'))) {
+                  const url = new URL(child.href, window.location.href);
+                  if (url.origin !== window.location.origin) {
+                      child.href = '/api/proxy/raw/' + child.href;
+                  }
+               }
+           }
+           return originalAppendChild.call(this, child);
+        };
+
+        const originalInsertBefore = Element.prototype.insertBefore;
+        Element.prototype.insertBefore = function(child, ref) {
+           if (child && child.tagName) {
+               if (child.tagName === 'SCRIPT' && child.src && (child.src.startsWith('http://') || child.src.startsWith('https://'))) {
+                  const url = new URL(child.src, window.location.href);
+                  if (url.origin !== window.location.origin) {
+                      child.src = '/api/proxy/raw/' + child.src;
+                  }
+               }
+               if (child.tagName === 'LINK' && child.href && (child.href.startsWith('http://') || child.href.startsWith('https://'))) {
+                  const url = new URL(child.href, window.location.href);
+                  if (url.origin !== window.location.origin) {
+                      child.href = '/api/proxy/raw/' + child.href;
+                  }
+               }
+           }
+           return originalInsertBefore.call(this, child, ref);
+        };
+
+        const originalFetch = window.fetch;
+        window.fetch = async function(...args) {
+            if (typeof args[0] === 'string') {
+                if (args[0].startsWith('http://') || args[0].startsWith('https://')) {
+                    const url = new URL(args[0]);
+                    if (url.origin !== window.location.origin) {
+                        args[0] = '/api/proxy/raw/' + args[0];
+                    }
+                } else if (args[0].startsWith('/')) {
+                    // It's already relative to the proxy base due to <base> tag, 
+                    // but some JS ignores <base> for fetch. Let's fix.
+                    args[0] = window.document.baseURI ? new URL(args[0], window.document.baseURI).href : args[0];
+                }
+            } else if (args[0] instanceof Request) {
+                 const req = args[0];
+                 if (req.url.startsWith('http://') || req.url.startsWith('https://')) {
+                     const url = new URL(req.url);
+                     if (url.origin !== window.location.origin) {
+                         args[0] = new Request('/api/proxy/raw/' + req.url, req);
+                     }
+                 }
             }
-         }
-         if (child.tagName === 'LINK' && child.href && (child.href.startsWith('http://') || child.href.startsWith('https://'))) {
-            const url = new URL(child.href);
-            if (url.origin !== window.location.origin) {
-                child.href = '/api/proxy/raw/' + child.href;
+            return originalFetch.apply(this, args);
+        };
+
+        const originalXHR = window.XMLHttpRequest.prototype.open;
+        window.XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+            if (typeof url === 'string') {
+                if (url.startsWith('http://') || url.startsWith('https://')) {
+                    const u = new URL(url);
+                    if (u.origin !== window.location.origin) {
+                        url = '/api/proxy/raw/' + url;
+                    }
+                } else if (url.startsWith('/')) {
+                    url = window.document.baseURI ? new URL(url, window.document.baseURI).href : url;
+                }
             }
-         }
-         return originalAppendChild.call(this, child);
-      };
+            return originalXHR.call(this, method, url, ...rest);
+        };
 
-      const originalFetch = window.fetch;
-      window.fetch = async function(...args) {
-          if (typeof args[0] === 'string' && (args[0].startsWith('http://') || args[0].startsWith('https://'))) {
-              const url = new URL(args[0]);
-              if (url.origin !== window.location.origin) {
-                  args[0] = '/api/proxy/raw/' + args[0];
-              }
+        const originalWorker = window.Worker;
+        window.Worker = function(url, options) {
+            if (typeof url === 'string' && (url.startsWith('http://') || url.startsWith('https://'))) {
+                url = '/api/proxy/raw/' + url;
+            }
+            return new originalWorker(url, options);
+        };
+
+        const originalWebSocket = window.WebSocket;
+        window.WebSocket = function(url, protocols) {
+            if (typeof url === 'string') {
+                 if (url.startsWith('ws://') || url.startsWith('wss://')) {
+                     // Can't proxy WS directly through the same route without upgrade handling
+                     // but we could try to rewrite if we had a WS proxy. 
+                     // For now just leave it as is or rewrite to a wss proxy endpoint.
+                 }
+            }
+            return protocols ? new originalWebSocket(url, protocols) : new originalWebSocket(url);
+        };
+
+        const originalEventSource = window.EventSource;
+        window.EventSource = function(url, options) {
+             if (typeof url === 'string' && (url.startsWith('http://') || url.startsWith('https://'))) {
+                 url = '/api/proxy/raw/' + url;
+             }
+             return options ? new originalEventSource(url, options) : new originalEventSource(url);
+        };
+
+        document.addEventListener('submit', function(e) {
+           e.preventDefault();
+           const form = e.target;
+           const action = form.action.startsWith('http') 
+             ? form.action 
+             : new URL(form.action, document.baseURI).href;
+           const method = (form.method || 'GET').toUpperCase();
+           
+           const formData = new FormData(form);
+           const body = new URLSearchParams(formData).toString();
+           
+           window.parent.postMessage({ 
+             type: 'recorder_navigate', 
+             url: action,
+             method: method,
+             body: body
+           }, '*');
+        }, true);
+
+        document.addEventListener('click', function(e) {
+          var target = e.target;
+          var selector = target.tagName.toLowerCase();
+          if (target.id) {
+            selector += '#' + target.id;
+          } else if (target.className && typeof target.className === 'string') {
+            selector += '.' + target.className.split(' ').join('.');
           }
-          return originalFetch.apply(this, args);
-      };
+          window.parent.postMessage({ type: 'recorder_click', selector: selector }, '*');
 
-      const originalXHR = window.XMLHttpRequest.prototype.open;
-      window.XMLHttpRequest.prototype.open = function(method, url, ...rest) {
-          if (typeof url === 'string' && (url.startsWith('http://') || url.startsWith('https://'))) {
-              const u = new URL(url);
-              if (u.origin !== window.location.origin) {
-                  url = '/api/proxy/raw/' + url;
-              }
+          var a = target.closest('a');
+          if (a && a.href && !a.href.startsWith('javascript:') && !a.href.startsWith('#')) {
+              e.preventDefault();
+              e.stopPropagation();
+              const url = a.href.startsWith('http') ? a.href : new URL(a.href, document.baseURI).href;
+              window.parent.postMessage({ type: 'recorder_navigate', url: url }, '*');
           }
-          return originalXHR.call(this, method, url, ...rest);
-      };
-
-      document.addEventListener('submit', function(e) {
-         e.preventDefault();
-         const form = e.target;
-         const action = form.action.startsWith('http') 
-           ? form.action 
-           : new URL(form.action, document.baseURI).href;
-         const method = (form.method || 'GET').toUpperCase();
-         
-         const formData = new FormData(form);
-         const body = new URLSearchParams(formData).toString();
-         
-         window.parent.postMessage({ 
-           type: 'recorder_navigate', 
-           url: action,
-           method: method,
-           body: body
-         }, '*');
-      }, true);
-
-      document.addEventListener('click', function(e) {
-        var target = e.target;
-        var selector = target.tagName.toLowerCase();
-        if (target.id) {
-          selector += '#' + target.id;
-        } else if (target.className && typeof target.className === 'string') {
-          selector += '.' + target.className.split(' ').join('.');
-        }
-        window.parent.postMessage({ type: 'recorder_click', selector: selector }, '*');
-
-        var a = target.closest('a');
-        if (a && a.href && !a.href.startsWith('javascript:')) {
-            e.preventDefault();
-            e.stopPropagation();
-            window.parent.postMessage({ type: 'recorder_navigate', url: a.href }, '*');
-        }
-      }, true);
-
-      document.addEventListener('submit', function(e) {
-         e.preventDefault();
-         const action = e.target.action || window.location.href;
-         window.parent.postMessage({ type: 'recorder_navigate', url: action }, '*');
-      }, true);
+        }, true);
+      })();
     </script>
     <base href="/api/proxy/raw/${targetUrl}">
     `;
