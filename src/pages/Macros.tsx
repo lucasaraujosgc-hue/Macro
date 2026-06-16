@@ -37,6 +37,8 @@ export default function Macros() {
 
       if (event.data.type === 'recorder_click') {
         addStep('click', { selector: event.data.selector });
+      } else if (event.data.type === 'recorder_type') {
+        addStep('type', { selector: event.data.selector, value: '' });
       } else if (event.data.type === 'recorder_navigate') {
         const url = event.data.url;
         if (!url.startsWith('http')) return;
@@ -96,6 +98,8 @@ export default function Macros() {
     loadMacros();
   };
 
+  const [draggedStepIndex, setDraggedStepIndex] = useState<number | null>(null);
+
   const addStep = (type: MacroStepType, data: Partial<MacroStep> = {}) => {
     setEditingMacro(prev => {
       if(!prev) return prev;
@@ -104,6 +108,42 @@ export default function Macros() {
         steps: [...prev.steps, { id: uuidv4(), type, ...data }]
       };
     });
+  };
+
+  const duplicateStep = (step: MacroStep, index: number) => {
+    if(!editingMacro) return;
+    const newStep = { ...step, id: uuidv4() };
+    const newSteps = [...editingMacro.steps];
+    newSteps.splice(index + 1, 0, newStep);
+    setEditingMacro({
+      ...editingMacro,
+      steps: newSteps
+    });
+  };
+
+  const handleDragStart = (e: React.DragEvent, index: number) => {
+    setDraggedStepIndex(index);
+    e.dataTransfer.effectAllowed = "move";
+  };
+
+  const handleDrop = (e: React.DragEvent, dropIndex: number) => {
+    e.preventDefault();
+    if (draggedStepIndex === null || draggedStepIndex === dropIndex) return;
+    if (!editingMacro) return;
+    
+    const newSteps = [...editingMacro.steps];
+    const [draggedItem] = newSteps.splice(draggedStepIndex, 1);
+    newSteps.splice(dropIndex, 0, draggedItem);
+    
+    setEditingMacro({
+      ...editingMacro,
+      steps: newSteps
+    });
+    setDraggedStepIndex(null);
+  };
+  
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
   };
 
   const updateStep = (id: string, updates: Partial<MacroStep>) => {
@@ -181,14 +221,24 @@ export default function Macros() {
             )}
 
             {editingMacro.steps.map((step, index) => (
-              <div key={step.id} className="flex items-start backdrop-blur-md p-4 rounded-xl border border-white/10 bg-gradient-to-r from-white/5 to-transparent">
-                <div className="mt-1 mr-3 text-slate-500"><GripVertical className="h-5 w-5"/></div>
+              <div 
+                key={step.id} 
+                draggable 
+                onDragStart={(e) => handleDragStart(e, index)}
+                onDragOver={handleDragOver}
+                onDrop={(e) => handleDrop(e, index)}
+                className={`flex items-start backdrop-blur-md p-4 rounded-xl border transition-all ${draggedStepIndex === index ? 'opacity-50 border-indigo-500 scale-95' : 'border-white/10 bg-gradient-to-r from-white/5 to-transparent'}`}
+              >
+                <div className="mt-1 mr-3 text-slate-500 cursor-grab hover:text-indigo-400 active:cursor-grabbing"><GripVertical className="h-5 w-5"/></div>
                 <div className="flex-1 grid gap-3">
                   <div className="flex justify-between items-center">
                     <span className="font-bold text-indigo-400 font-mono text-[11px] uppercase tracking-wider">
                       {String(index + 1).padStart(2, '0')}. {step.type.toUpperCase()}
                     </span>
-                    <button onClick={() => removeStep(step.id)} className="text-slate-500 hover:text-red-400 transition-colors bg-white/5 hover:bg-white/10 p-1.5 rounded"><Trash2 className="h-4 w-4"/></button>
+                    <div className="flex space-x-2">
+                       <button onClick={() => duplicateStep(step, index)} className="text-slate-400 hover:text-indigo-300 transition-colors bg-white/5 hover:bg-white/10 px-2 py-1 text-xs font-semibold rounded">Duplicar</button>
+                       <button onClick={() => removeStep(step.id)} className="text-slate-500 hover:text-red-400 transition-colors bg-white/5 hover:bg-white/10 p-1 rounded"><Trash2 className="h-4 w-4"/></button>
+                    </div>
                   </div>
                   
                   {step.type === 'navigate' && (
@@ -198,9 +248,19 @@ export default function Macros() {
                     <input type="text" placeholder="Seletor CSS (ex: #botao-login)" value={step.selector || ''} onChange={e => updateStep(step.id, {selector: e.target.value})} className="w-full text-sm bg-black/20 border-white/10 text-indigo-300 placeholder-slate-600 rounded-lg border px-3 py-2 font-mono outline-none focus:border-indigo-500"/>
                   )}
                   {step.type === 'type' && (
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div className="grid grid-cols-1 gap-3">
                       <input type="text" placeholder="Seletor CSS" value={step.selector || ''} onChange={e => updateStep(step.id, {selector: e.target.value})} className="text-sm bg-black/20 border-white/10 text-indigo-300 placeholder-slate-600 rounded-lg border px-3 py-2 font-mono outline-none focus:border-indigo-500"/>
-                      <input type="text" placeholder="Constante ou Var (ex: {{CNPJ}}, {{RAZAO_SOCIAL}})" value={step.value || ''} onChange={e => updateStep(step.id, {value: e.target.value})} className="text-sm bg-black/20 border-white/10 text-white placeholder-slate-600 rounded-lg border px-3 py-2 outline-none focus:border-indigo-500"/>
+                      <div>
+                         <input type="text" placeholder="Constante ou Var (ex: {{CNPJ}}, {{RAZAO_SOCIAL}})" value={step.value || ''} onChange={e => updateStep(step.id, {value: e.target.value})} className="w-full text-sm bg-black/20 border-white/10 text-white placeholder-slate-600 rounded-lg border px-3 py-2 outline-none focus:border-indigo-500"/>
+                         <div className="mt-2 flex flex-wrap gap-2 text-[10px]">
+                            <span className="text-slate-500 uppercase font-semibold mr-1">Vars Disponíveis:</span>
+                            {['{{CNPJ}}', '{{RAZAO_SOCIAL}}', '{{FANTASIA}}', '{{EMAIL}}', '{{TELEFONE}}', '{{IE}}', '{{IM}}'].map(v => (
+                               <button key={v} onClick={() => updateStep(step.id, {value: (step.value || '') + v})} className="px-1.5 py-0.5 rounded border border-white/10 bg-white/5 text-slate-300 hover:text-indigo-400 hover:border-indigo-500/50 transition-colors">
+                                  {v}
+                               </button>
+                            ))}
+                         </div>
+                      </div>
                     </div>
                   )}
                   {step.type === 'install_cert' && (

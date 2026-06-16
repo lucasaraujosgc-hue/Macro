@@ -24,7 +24,7 @@ export interface Certificate {
   type: 'PF' | 'PJ';
 }
 
-export type MacroStepType = 'navigate' | 'click' | 'type' | 'wait' | 'captcha_wait';
+export type MacroStepType = 'navigate' | 'click' | 'type' | 'wait' | 'captcha_wait' | 'install_cert';
 
 export interface MacroStep {
   id: string;

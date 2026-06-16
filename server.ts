@@ -611,7 +611,8 @@ app.all("/api/proxy", async (req, res) => {
           } else if (target.className && typeof target.className === 'string') {
             selector += '.' + target.className.split(' ').join('.');
           }
-          window.parent.postMessage({ type: 'recorder_click', selector: selector }, '*');
+          var isInput = target.tagName.toLowerCase() === 'input' || target.tagName.toLowerCase() === 'textarea' || target.tagName.toLowerCase() === 'select';
+          window.parent.postMessage({ type: isInput ? 'recorder_type' : 'recorder_click', selector: selector, tagName: target.tagName.toLowerCase() }, '*');
 
           var a = target.closest('a');
           if (a && a.href && !a.href.startsWith('javascript:') && !a.href.startsWith('#')) {
