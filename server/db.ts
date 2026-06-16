@@ -52,7 +52,6 @@ export interface DBSchema {
   companies: Company[];
   certificates: Certificate[];
   macros: Macro[];
-  files: any[]; // DownloadedFile
 }
 
 let pool: Pool | null = null;
@@ -66,7 +65,7 @@ if (DB_URL) {
   console.log("Using JSON Database fallback");
 }
 
-const defaultDB: DBSchema = { companies: [], certificates: [], macros: [], files: [] };
+const defaultDB: DBSchema = { companies: [], certificates: [], macros: [] };
 
 export async function initDB() {
   if (usePostgres && pool) {
@@ -81,10 +80,6 @@ export async function initDB() {
           data JSONB NOT NULL
         );
         CREATE TABLE IF NOT EXISTS macros (
-          id VARCHAR(255) PRIMARY KEY,
-          data JSONB NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS files (
           id VARCHAR(255) PRIMARY KEY,
           data JSONB NOT NULL
         );
@@ -231,24 +226,6 @@ export const db = {
     } else {
       const data = readJsonDB();
       data.macros = data.macros.filter(c => c.id !== id);
-      writeJsonDB(data);
-    }
-  },
-  
-  getFiles: async (): Promise<any[]> => {
-    if (usePostgres && pool) {
-      const res = await pool.query('SELECT data FROM files');
-      return res.rows.map(row => row.data);
-    }
-    return readJsonDB().files || [];
-  },
-  addFile: async (f: any) => {
-    if (usePostgres && pool) {
-      await pool.query('INSERT INTO files (id, data) VALUES ($1, $2)', [f.id, f]);
-    } else {
-      const data = readJsonDB();
-      data.files = data.files || [];
-      data.files.push(f);
       writeJsonDB(data);
     }
   }

@@ -1,5 +1,5 @@
 import { NavLink, Outlet } from "react-router-dom";
-import { LayoutDashboard, Building2, KeyRound, PlaySquare, Settings, Activity, FolderOpen } from "lucide-react";
+import { LayoutDashboard, Building2, KeyRound, PlaySquare, Settings, Activity } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const navigation = [
@@ -8,7 +8,6 @@ const navigation = [
   { name: "Certificados", href: "/certificates", icon: KeyRound },
   { name: "Automações (RPA)", href: "/macros", icon: PlaySquare },
   { name: "Execução Ao Vivo", href: "/execution", icon: Activity },
-  { name: "Galeria de Arquivos", href: "/gallery", icon: FolderOpen },
 ];
 
 export default function Layout() {

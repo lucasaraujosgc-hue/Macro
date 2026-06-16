@@ -16,45 +16,6 @@ const PORT = 3000;
 app.use(cors());
 app.use(express.json());
 
-// --- ASSET PROXY MIDDLEWARE ---
-// Catches assets that escaped the proxy prefix (e.g. absolute paths like /fonts/font.woff loaded from CSS)
-app.use(async (req, res, next) => {
-  if (req.originalUrl.startsWith("/api/") || req.originalUrl.startsWith("/@") || req.originalUrl.startsWith("/node_modules/")) {
-    return next();
-  }
-
-  const referer = req.headers.referer;
-  if (referer && referer.includes("/api/proxy/raw/")) {
-    try {
-      const match = referer.match(/\/api\/proxy\/raw\/(.+)/);
-      if (match && match[1]) {
-        // e.g. targetBase = https://host.com/some/path/
-        const targetBase = decodeURIComponent(match[1]);
-        const targetUrl = new URL(req.originalUrl, targetBase).href;
-
-        console.log(`[Proxy Recovery] Proxying escaped asset ${req.originalUrl} to ${targetUrl}`);
-
-        const response = await fetch(targetUrl, {
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
-          }
-        });
-
-        if (response.ok) {
-           const contentType = response.headers.get("content-type") || "";
-           res.setHeader("Content-Type", contentType);
-           res.setHeader("Access-Control-Allow-Origin", "*");
-           const buffer = await response.arrayBuffer();
-           return res.send(Buffer.from(buffer));
-        }
-      }
-    } catch (e) {
-      console.error("[Proxy Recovery Error]", req.originalUrl, e);
-    }
-  }
-  next();
-});
-
 const upload = multer({ storage: multer.memoryStorage() });
 
 // --- API ROUTES ---
@@ -100,17 +61,6 @@ app.put("/api/macros/:id", async (req, res) => {
 app.delete("/api/macros/:id", async (req, res) => {
   await db.deleteMacro(req.params.id);
   res.json({ success: true });
-});
-
-// Files
-app.get("/api/files", async (req, res) => {
-  res.json(await db.getFiles());
-});
-
-app.post("/api/files", async (req, res) => {
-  const file = { ...req.body, id: uuidv4(), createdAt: new Date().toISOString() };
-  await db.addFile(file);
-  res.json(file);
 });
 
 // Certificates
@@ -204,7 +154,6 @@ let activeExecution: {
     status: 'running' | 'paused' | 'completed' | 'error',
     currentStepIndex: number,
     screenshot?: string,
-    currentUrl?: string,
     logs: string[]
 } | null = null;
 
@@ -222,7 +171,6 @@ app.post("/api/execute/:macroId", async (req, res) => {
       macroId,
       status: 'running',
       currentStepIndex: 0,
-      currentUrl: 'about:blank',
       logs: [`Started macro ${macro.name}`, `Empresas selecionadas (${targetCompanies.length}): ${companyNames}`]
   };
 
@@ -265,10 +213,6 @@ function simulateExecution(macro: any, startIndex = 0) {
         activeExecution.currentStepIndex = i;
         activeExecution.logs.push(`Executing step ${i+1}: ${step.type} - ${step.selector || step.value || ''}`);
 
-        if (step.type === 'navigate' && step.value) {
-           activeExecution.currentUrl = step.value;
-        }
-
         if (step.type === 'captcha_wait') {
             activeExecution.status = 'paused';
             activeExecution.logs.push("Paused. Waiting for manual captcha resolution.");
@@ -277,7 +221,7 @@ function simulateExecution(macro: any, startIndex = 0) {
             return; // Wait for user to call resolve-captcha
         }
 
-        let waitTimeMs = 1500;
+        let waitTimeMs = 1000;
         if (step.type === 'wait' && step.waitTime) waitTimeMs = step.waitTime * 1000;
 
         i++;
@@ -289,63 +233,6 @@ function simulateExecution(macro: any, startIndex = 0) {
 
 
 // --- PROXY ROUTE FOR RECORDING SIMULATOR ---
-// 1. Raw Passthrough
-app.all("/api/proxy/raw/*", async (req, res) => {
-    let targetUrl = req.originalUrl.replace("/api/proxy/raw/", "");
-    if (!targetUrl.startsWith("http")) return res.status(400).send("Invalid URL");
-    
-    try {
-        const response = await fetch(targetUrl, {
-          method: req.method,
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
-          } // omit accept headers to avoid issues
-        });
-        
-        res.setHeader("Access-Control-Allow-Origin", "*");
-        response.headers.forEach((value, key) => {
-            if (['content-type', 'content-length', 'cache-control'].includes(key.toLowerCase())) {
-                res.setHeader(key, value);
-            }
-        });
-
-        const contentType = response.headers.get("content-type") || "";
-        
-        if (contentType.includes("text/css")) {
-            let css = await response.text();
-            // Rewrite url(...) in CSS
-            css = css.replace(/url\((['"]?)([^'"\)]+)(['"]?)\)/gi, (match, q1, url, q2) => {
-                if (url.startsWith("data:")) return match;
-                if (url.startsWith("http://") || url.startsWith("https://")) {
-                    return `url(${q1}/api/proxy/raw/${url}${q2})`;
-                }
-                const absoluteUrl = new URL(url, targetUrl).href;
-                return `url(${q1}/api/proxy/raw/${absoluteUrl}${q2})`;
-            });
-            // Also rewrite @import "..."
-            css = css.replace(/@import\s+(['"])([^'"]+)(['"])/gi, (match, q1, url, q2) => {
-                 if (url.startsWith("http://") || url.startsWith("https://")) {
-                    return `@import ${q1}/api/proxy/raw/${url}${q2}`;
-                }
-                const absoluteUrl = new URL(url, targetUrl).href;
-                return `@import ${q1}/api/proxy/raw/${absoluteUrl}${q2}`;
-            });
-            res.setHeader("Content-Length", Buffer.byteLength(css));
-            return res.send(css);
-        } else if (contentType.includes("application/javascript") || contentType.includes("text/javascript")) {
-             let js = await response.text();
-             res.setHeader("Content-Length", Buffer.byteLength(js));
-             return res.send(js);
-        }
-        
-        const buffer = await response.arrayBuffer();
-        res.send(Buffer.from(buffer));
-    } catch (e: any) {
-        res.status(500).send(`Failed to proxy: ${e.message}`);
-    }
-});
-
-// 2. HTML Injector
 app.get("/api/proxy", async (req, res) => {
   const targetUrl = req.query.url as string;
   if (!targetUrl) return res.status(400).send("No URL");
@@ -358,8 +245,6 @@ app.get("/api/proxy", async (req, res) => {
       }
     });
 
-    res.setHeader("Access-Control-Allow-Origin", "*");
-
     const contentType = response.headers.get("content-type") || "";
     if (!contentType.includes("text/html")) {
       const buffer = await response.arrayBuffer();
@@ -369,72 +254,14 @@ app.get("/api/proxy", async (req, res) => {
 
     let html = await response.text();
     
-    // Replace absolute paths (/something) in HTML to force them into the proxy prefix.
-    try {
-      const origin = new URL(targetUrl).origin;
-      html = html.replace(/(src|href)="(\/[^"]*)"/gi, `$1="/api/proxy/raw/${origin}$2"`);
-      html = html.replace(/(src|href)='(\/[^']*)'/gi, `$1='/api/proxy/raw/${origin}$2'`);
-    } catch (e) {
-      // Ignored
-    }
-
-    // Rewrite absolute HTTP/HTTPS links so they use our proxy
-    html = html.replace(/(src|href)="([^"]*)"/gi, (match, attr, val) => {
-      if (val.startsWith("http://") || val.startsWith("https://")) {
-        return `${attr}="/api/proxy?url=${encodeURIComponent(val)}"`;
-      }
-      return match;
-    });
-    html = html.replace(/(src|href)='([^']*)'/gi, (match, attr, val) => {
-      if (val.startsWith("http://") || val.startsWith("https://")) {
-        return `${attr}='/api/proxy?url=${encodeURIComponent(val)}'`;
-      }
-      return match;
-    });
+    // Fix relative paths for src/href to make CSS/JS work when proxied
+    const originUrl = new URL('/', targetUrl).origin;
+    html = html.replace(/(src|href)="\/([^"]*)"/gi, `$1="${originUrl}/$2"`);
+    html = html.replace(/(src|href)='\/([^']*)'/gi, `$1='${originUrl}/$2'`);
 
     // Inject click interception script
     const script = `
     <script>
-      // Intercept dynamic script/link injections to proxy them
-      const originalAppendChild = Element.prototype.appendChild;
-      Element.prototype.appendChild = function(child) {
-         if (child.tagName === 'SCRIPT' && child.src && (child.src.startsWith('http://') || child.src.startsWith('https://'))) {
-            const url = new URL(child.src);
-            if (url.origin !== window.location.origin) {
-                child.src = '/api/proxy/raw/' + child.src;
-            }
-         }
-         if (child.tagName === 'LINK' && child.href && (child.href.startsWith('http://') || child.href.startsWith('https://'))) {
-            const url = new URL(child.href);
-            if (url.origin !== window.location.origin) {
-                child.href = '/api/proxy/raw/' + child.href;
-            }
-         }
-         return originalAppendChild.call(this, child);
-      };
-
-      const originalFetch = window.fetch;
-      window.fetch = async function(...args) {
-          if (typeof args[0] === 'string' && (args[0].startsWith('http://') || args[0].startsWith('https://'))) {
-              const url = new URL(args[0]);
-              if (url.origin !== window.location.origin) {
-                  args[0] = '/api/proxy/raw/' + args[0];
-              }
-          }
-          return originalFetch.apply(this, args);
-      };
-
-      const originalXHR = window.XMLHttpRequest.prototype.open;
-      window.XMLHttpRequest.prototype.open = function(method, url, ...rest) {
-          if (typeof url === 'string' && (url.startsWith('http://') || url.startsWith('https://'))) {
-              const u = new URL(url);
-              if (u.origin !== window.location.origin) {
-                  url = '/api/proxy/raw/' + url;
-              }
-          }
-          return originalXHR.call(this, method, url, ...rest);
-      };
-
       document.addEventListener('click', function(e) {
         var target = e.target;
         var selector = target.tagName.toLowerCase();
@@ -459,7 +286,7 @@ app.get("/api/proxy", async (req, res) => {
          window.parent.postMessage({ type: 'recorder_navigate', url: action }, '*');
       }, true);
     </script>
-    <base href="/api/proxy/raw/${targetUrl}">
+    <base href="${targetUrl}">
     `;
     
     if (html.toLowerCase().includes('<head>')) {
