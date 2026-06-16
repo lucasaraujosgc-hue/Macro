@@ -1050,6 +1050,52 @@ app.all("/api/proxy", async (req, res) => {
           return url;
         };
 
+        // ── SPA navigation intercept (pushState/replaceState/location) ─────────
+        // Click-based <a href> capture (below) misses sites that route client-side
+        // (React/Angular menus calling router.push() instead of a real <a> navigation),
+        // and misses direct script navigation like window.location = '...'.
+        function notifyNavigate(url) {
+          try { url = new URL(url, document.baseURI).href; } catch(e) {}
+          window.parent.postMessage({ type: 'recorder_navigate', url: url }, '*');
+        }
+
+        var _origPushState = history.pushState;
+        history.pushState = function(state, title, url) {
+          var ret = _origPushState.apply(this, arguments);
+          if (url) notifyNavigate(url);
+          return ret;
+        };
+
+        var _origReplaceState = history.replaceState;
+        history.replaceState = function(state, title, url) {
+          var ret = _origReplaceState.apply(this, arguments);
+          if (url) notifyNavigate(url);
+          return ret;
+        };
+
+        try {
+          var _locProto = Object.getPrototypeOf(window.location);
+          var _hrefDesc = Object.getOwnPropertyDescriptor(_locProto, 'href');
+          if (_hrefDesc && _hrefDesc.set) {
+            Object.defineProperty(_locProto, 'href', {
+              configurable: true,
+              enumerable: _hrefDesc.enumerable,
+              get: _hrefDesc.get,
+              set: function(url) {
+                notifyNavigate(url);
+                return _hrefDesc.set.call(this, url);
+              }
+            });
+          }
+        } catch(e) {}
+
+        try {
+          var _origAssign = window.location.assign.bind(window.location);
+          window.location.assign = function(url) { notifyNavigate(url); return _origAssign(url); };
+          var _origReplace = window.location.replace.bind(window.location);
+          window.location.replace = function(url) { notifyNavigate(url); return _origReplace(url); };
+        } catch(e) {}
+
         // ── Form submit intercept ─────────────────────────────────────────────
         document.addEventListener('submit', function(e) {
           e.preventDefault();
