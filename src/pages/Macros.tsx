@@ -143,10 +143,12 @@ export default function Macros() {
   };
 
   const updateStep = (id: string, updates: Partial<MacroStep>) => {
-    if(!editingMacro) return;
-    setEditingMacro({
-      ...editingMacro,
-      steps: editingMacro.steps.map(s => s.id === id ? { ...s, ...updates } : s)
+    setEditingMacro(prev => {
+      if(!prev) return prev;
+      return {
+        ...prev,
+        steps: prev.steps.map(s => s.id === id ? { ...s, ...updates } : s)
+      };
     });
   };
 
@@ -251,7 +253,19 @@ export default function Macros() {
                          <div className="mt-2 flex flex-wrap gap-2 text-[10px]">
                             <span className="text-slate-500 uppercase font-semibold mr-1">Vars Disponíveis:</span>
                             {['{{CNPJ}}', '{{RAZAO_SOCIAL}}', '{{FANTASIA}}', '{{EMAIL}}', '{{TELEFONE}}', '{{IE}}', '{{IM}}'].map(v => (
-                               <button key={v} onClick={() => updateStep(step.id, {value: (step.value || '') + v})} className="px-1.5 py-0.5 rounded border border-white/10 bg-white/5 text-slate-300 hover:text-indigo-400 hover:border-indigo-500/50 transition-colors">
+                               <button key={v} onClick={() => {
+                                 setEditingMacro(prev => {
+                                   if (!prev) return prev;
+                                   return {
+                                     ...prev,
+                                     steps: prev.steps.map(s => 
+                                       s.id === step.id 
+                                         ? { ...s, value: (s.value || '') + v }
+                                         : s
+                                     )
+                                   };
+                                 });
+                               }} className="px-1.5 py-0.5 rounded border border-white/10 bg-white/5 text-slate-300 hover:text-indigo-400 hover:border-indigo-500/50 transition-colors">
                                   {v}
                                </button>
                             ))}
