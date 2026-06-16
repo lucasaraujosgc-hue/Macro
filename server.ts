@@ -605,12 +605,22 @@ app.all("/api/proxy", async (req, res) => {
 
         document.addEventListener('click', function(e) {
           var target = e.target;
-          var selector = target.tagName.toLowerCase();
-          if (target.id) {
-            selector += '#' + target.id;
-          } else if (target.className && typeof target.className === 'string') {
-            selector += '.' + target.className.split(' ').join('.');
+          
+          function getSelector(el) {
+            if (el.id) return '#' + el.id;
+            var safeClasses = Array.from(el.classList || [])
+              .filter(function(c) { return /^[a-zA-Z_-][a-zA-Z0-9_-]*$/.test(c); })
+              .slice(0, 2);
+            var base = el.tagName.toLowerCase();
+            if (safeClasses.length) base += '.' + safeClasses.join('.');
+            var siblings = el.parentElement 
+              ? Array.from(el.parentElement.children).filter(function(s) { return s.tagName === el.tagName; })
+              : [];
+            if (siblings.length > 1) base += ':nth-of-type(' + (siblings.indexOf(el) + 1) + ')';
+            return base;
           }
+          
+          var selector = getSelector(target);
           var isInput = target.tagName.toLowerCase() === 'input' || target.tagName.toLowerCase() === 'textarea' || target.tagName.toLowerCase() === 'select';
           window.parent.postMessage({ type: isInput ? 'recorder_type' : 'recorder_click', selector: selector, tagName: target.tagName.toLowerCase() }, '*');
 

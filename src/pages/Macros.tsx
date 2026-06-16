@@ -31,10 +31,6 @@ export default function Macros() {
       // Must check for event.data existence to avoid errors on generic postMessages
       if (!event.data || typeof event.data !== 'object') return;
       
-      // If we aren't editing, we still might want to capture, but the handler logic uses editingMacro.
-      // Wait, since we are using functional state update in addStep, we can actually just call it if editingMacro is set.
-      if (!editingMacro) return;
-
       if (event.data.type === 'recorder_click') {
         addStep('click', { selector: event.data.selector });
       } else if (event.data.type === 'recorder_type') {
@@ -67,7 +63,7 @@ export default function Macros() {
     };
     window.addEventListener("message", handler);
     return () => window.removeEventListener("message", handler);
-  }, [editingMacro]);
+  }, []);
 
   useEffect(() => {
     if (proxyPostData) {
@@ -341,9 +337,16 @@ export default function Macros() {
                         <div className="flex-1 flex items-center justify-center p-8 mt-8 custom-scrollbar">
                            <div className="w-full max-w-3xl bg-white shadow-2xl rounded-xl border border-slate-200 p-8" onClick={(e) => {
                                 const target = e.target as HTMLElement;
-                                let selector = target.tagName.toLowerCase();
-                                if (target.id) selector += '#' + target.id;
-                                else if (target.className && typeof target.className === 'string') selector += '.' + target.className.split(' ').join('.');
+                                let selector = '';
+                                if (target.id) {
+                                  selector = '#' + target.id;
+                                } else {
+                                  const safeClasses = Array.from(target.classList)
+                                    .filter(c => /^[a-zA-Z_-][a-zA-Z0-9_-]*$/.test(c))
+                                    .slice(0, 2);
+                                  selector = target.tagName.toLowerCase();
+                                  if (safeClasses.length) selector += '.' + safeClasses.join('.');
+                                }
                                 addStep('click', { selector });
                            }}>
                                 <div className="flex justify-between items-center mb-10 border-b pb-4">
