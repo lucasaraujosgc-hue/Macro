@@ -92,11 +92,26 @@ export default function Execution() {
                    // we show the proxy iframe or a mocked scanner overlay on top of the iframe.
                    <div className="w-full h-full relative">
                        <iframe 
-                           src={`/api/proxy?url=${encodeURIComponent(execution.currentUrl)}&topLevel=true`} 
+                           src={`/api/proxy?url=${encodeURIComponent(execution.currentUrl)}`} 
                            className="w-full h-full border-none opacity-50 grayscale select-none pointer-events-none"
                            title="Browser Simulador"
                        />
-                       {/* Removing 'Coletando Dados' overlay as requested */}
+                       {execution.status === 'running' && (
+                          <div className="absolute inset-0 flex flex-col items-center justify-center p-6 bg-indigo-900/10 backdrop-blur-[2px]">
+                              <div className="w-full max-w-md bg-[#0f111a]/80 backdrop-blur-xl border border-indigo-500/30 p-6 rounded-xl shadow-2xl">
+                                  <div className="flex items-center space-x-4 mb-4">
+                                     <div className="w-10 h-10 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin flex-shrink-0"></div>
+                                     <div>
+                                        <h3 className="text-white font-bold text-sm uppercase tracking-wider">Coletando Dados</h3>
+                                        <p className="text-indigo-300 text-xs mt-0.5">Extraindo DOM e avaliando seletores...</p>
+                                     </div>
+                                  </div>
+                                  <div className="bg-black/40 h-2 rounded-full overflow-hidden mt-2">
+                                     <div className="h-full bg-indigo-500 w-1/2 rounded-full animate-pulse"></div>
+                                  </div>
+                              </div>
+                          </div>
+                       )}
                    </div>
                ) : (
                    <div className="text-center text-slate-500 space-y-3">
