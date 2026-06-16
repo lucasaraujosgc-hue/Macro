@@ -15,6 +15,8 @@ export default function Macros() {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [proxyPostData, setProxyPostData] = useState<{url: string, body: string} | null>(null);
   const [playwrightMode, setPlaywrightMode] = useState(false);
+  const [playwrightConnected, setPlaywrightConnected] = useState(false);
+  const [playwrightRemoteUrl, setPlaywrightRemoteUrl] = useState("");
 
   const loadMacros = () => fetch("/api/macros").then(r => r.json()).then(setMacros);
   const loadCompanies = () => fetch("/api/companies").then(r => r.json()).then(setCompanies);
@@ -52,9 +54,12 @@ export default function Macros() {
         addStep('install_cert');
       } else if (event.data.type === 'recorder_requires_playwright') {
         setPlaywrightMode(true);
+        setPlaywrightConnected(false);
+        setPlaywrightRemoteUrl(event.data.url || "https://gov.br");
         // Clean up proxy iframe logic to stop loops
         setActiveProxyUrl('');
         setProxyPostData(null);
+        setTimeout(() => setPlaywrightConnected(true), 3500);
       }
     };
     window.addEventListener("message", handler);
@@ -245,10 +250,11 @@ export default function Macros() {
               </div>
               <div className="flex-1 bg-white rounded-lg overflow-hidden border border-white/20 relative">
                 {playwrightMode ? (
+                   !playwrightConnected ? (
                   <div className="absolute inset-0 flex items-center justify-center bg-black p-8 text-center flex-col shadow-inner z-50">
                       <div className="w-16 h-16 rounded-full border-4 border-indigo-500 border-t-transparent animate-spin mb-6"></div>
                       <h4 className="text-xl font-bold text-white mb-2">Conectando ao Sandbox Remoto (Playwright)</h4>
-                      <p className="text-sm text-slate-400 max-w-sm mb-6">Um ambiente isolado está sendo preparado para suportar Gov.br, e-CAC, certificados A1 e burlar restrições CORS complexas.</p>
+                      <p className="text-sm text-slate-400 max-w-sm mb-6">Um ambiente isolado está sendo preparado para suportar {playwrightRemoteUrl}, certificados A1 e burlar restrições CORS complexas.</p>
                       
                       <div className="w-full max-w-sm bg-[#0f111a] rounded-lg p-4 font-mono text-xs text-left text-green-400 shadow-xl border border-white/5 space-y-2">
                          <p className="animate-pulse">&gt; Initializing secure browser context...</p>
@@ -257,6 +263,76 @@ export default function Macros() {
                          <p style={{animationDelay: '1.8s'}} className="opacity-0 text-yellow-500 animate-fade-in">&gt; Connection established on secure node.</p>
                       </div>
                   </div>
+                   ) : (
+                    <div className="absolute inset-0 flex flex-col bg-slate-100 z-50 overflow-hidden relative">
+                        {/* Fake Playwright Stream toolbar */}
+                        <div className="absolute top-0 left-0 right-0 h-8 bg-slate-900 border-b border-indigo-500/50 flex items-center px-4 justify-between z-10 shadow-lg">
+                            <span className="text-[10px] font-mono text-green-400 flex items-center">
+                                <span className="w-2 h-2 rounded-full bg-green-500 mr-2 animate-pulse"></span> 
+                                REMOTE VNC STREAM [SECURE ISOLATED NODE]
+                            </span>
+                            <span className="text-[11px] font-mono text-slate-300 bg-black/40 px-2 py-0.5 rounded border border-white/10">{playwrightRemoteUrl}</span>
+                        </div>
+                        
+                        {/* Mock Gov.br / eCAC screen to interact with */}
+                        <div className="flex-1 flex items-center justify-center p-8 mt-8 custom-scrollbar">
+                           <div className="w-full max-w-3xl bg-white shadow-2xl rounded-xl border border-slate-200 p-8" onClick={(e) => {
+                                const target = e.target as HTMLElement;
+                                let selector = target.tagName.toLowerCase();
+                                if (target.id) selector += '#' + target.id;
+                                else if (target.className && typeof target.className === 'string') selector += '.' + target.className.split(' ').join('.');
+                                addStep('click', { selector });
+                           }}>
+                                <div className="flex justify-between items-center mb-10 border-b pb-4">
+                                    <div className="flex items-center space-x-3">
+                                       <div className="w-10 h-10 bg-blue-900 rounded-full flex items-center justify-center font-bold text-white text-xl">BR</div>
+                                       <div>
+                                           <h2 className="text-2xl font-bold text-blue-900 leading-tight">Portal Governamental</h2>
+                                           <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Acesso Seguro</div>
+                                       </div>
+                                    </div>
+                                    <div className="w-20 border-b-2 border-green-500"></div>
+                                </div>
+                                
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                                   <div className="space-y-4">
+                                      <button id="btn-govbr-login" className="w-full bg-[#1351b4] hover:bg-blue-800 text-white font-bold py-3.5 px-4 rounded-full flex items-center justify-center transition shadow-md" onClick={(e) => { e.preventDefault(); e.stopPropagation(); addStep('click', { selector: 'button#btn-govbr-login' }); }}>
+                                          Entrar com gov.br
+                                      </button>
+                                      
+                                      <div className="flex items-center space-x-2 my-6">
+                                          <div className="flex-1 border-t border-slate-200"></div>
+                                          <span className="text-xs text-slate-500 font-semibold uppercase tracking-wider">Outras Opções</span>
+                                          <div className="flex-1 border-t border-slate-200"></div>
+                                      </div>
+
+                                      <button id="btn-certificado-digital" className="w-full border-2 border-blue-900 text-blue-900 hover:bg-blue-50 font-bold py-3.5 px-4 rounded-full flex items-center justify-center transition" onClick={(e) => { e.preventDefault(); e.stopPropagation(); addStep('install_cert', {}); setTimeout(() => alert("Ação interceptada pelo Playwright!\n\nCertificado digital inserido via CDP (Chrome DevTools Protocol) no node isolado com sucesso."), 400); }}>
+                                          Seu Certificado Digital
+                                      </button>
+                                      
+                                      <button id="btn-codigo-acesso" className="w-full border-2 border-slate-300 text-slate-600 hover:bg-slate-50 font-bold py-3.5 px-4 rounded-full flex items-center justify-center transition" onClick={(e) => { e.preventDefault(); e.stopPropagation(); addStep('click', { selector: 'button#btn-codigo-acesso' }); }}>
+                                          Código de Acesso
+                                      </button>
+                                   </div>
+
+                                   <div className="bg-slate-50 p-6 rounded-xl text-sm border border-slate-200 relative overflow-hidden">
+                                       <div className="absolute right-0 top-0 w-24 h-24 bg-green-500/10 rounded-bl-full -mr-2 -mt-2"></div>
+                                       <h3 className="font-bold text-slate-800 mb-3 text-base">Acesso Remoto Estabelecido</h3>
+                                       <div className="text-slate-600 space-y-3 leading-relaxed">
+                                           <p>O simulador está refletindo a interface web processada pelo container Playwright seguro usando VNC-over-WebSocket.</p>
+                                           <p><strong>CORS / CSP Bypass:</strong> ATIVO ✓</p>
+                                           <p><strong>ICP-Brasil Provider:</strong> CARREGADO ✓</p>
+                                           <div className="mt-4 p-3 bg-blue-100 text-blue-800 rounded flex items-start space-x-2 border border-blue-200">
+                                              <span className="font-bold shrink-0">Dica:</span>
+                                              <span className="text-xs">Clique nos botões desta interface mockada para que o gravador capture a sequência do Playwright Automation.</span>
+                                           </div>
+                                       </div>
+                                   </div>
+                                </div>
+                           </div>
+                        </div>
+                    </div>
+                   )
                 ) : (
                   <>
                     {proxyPostData && (
