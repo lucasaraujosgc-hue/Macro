@@ -20,7 +20,11 @@ app.use(express.urlencoded({ extended: true }));
 // --- ASSET PROXY MIDDLEWARE ---
 // Catches assets that escaped the proxy prefix (e.g. absolute paths like /fonts/font.woff loaded from CSS)
 app.use(async (req, res, next) => {
-  if (req.originalUrl.startsWith("/api/") || req.originalUrl.startsWith("/@") || req.originalUrl.startsWith("/node_modules/")) {
+  if (
+    req.originalUrl.startsWith("/api/") ||
+    req.originalUrl.startsWith("/@") ||
+    req.originalUrl.startsWith("/node_modules/")
+  ) {
     return next();
   }
 
@@ -33,20 +37,23 @@ app.use(async (req, res, next) => {
         const targetBase = decodeURIComponent(match[1]);
         const targetUrl = new URL(req.originalUrl, targetBase).href;
 
-        console.log(`[Proxy Recovery] Proxying escaped asset ${req.originalUrl} to ${targetUrl}`);
+        console.log(
+          `[Proxy Recovery] Proxying escaped asset ${req.originalUrl} to ${targetUrl}`,
+        );
 
         const response = await fetch(targetUrl, {
           headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
-          }
+            "User-Agent":
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+          },
         });
 
         if (response.ok) {
-           const contentType = response.headers.get("content-type") || "";
-           res.setHeader("Content-Type", contentType);
-           res.setHeader("Access-Control-Allow-Origin", "*");
-           const buffer = await response.arrayBuffer();
-           return res.send(Buffer.from(buffer));
+          const contentType = response.headers.get("content-type") || "";
+          res.setHeader("Content-Type", contentType);
+          res.setHeader("Access-Control-Allow-Origin", "*");
+          const buffer = await response.arrayBuffer();
+          return res.send(Buffer.from(buffer));
         }
       }
     } catch (e) {
@@ -109,7 +116,11 @@ app.get("/api/files", async (req, res) => {
 });
 
 app.post("/api/files", async (req, res) => {
-  const file = { ...req.body, id: uuidv4(), createdAt: new Date().toISOString() };
+  const file = {
+    ...req.body,
+    id: uuidv4(),
+    createdAt: new Date().toISOString(),
+  };
   await db.addFile(file);
   res.json(file);
 });
@@ -125,12 +136,13 @@ app.post("/api/certificates/upload", upload.single("pfx"), async (req, res) => {
     const password = req.body.password;
 
     if (!file) return res.status(400).json({ error: "No file uploaded" });
-    if (!password) return res.status(400).json({ error: "Password is required" });
+    if (!password)
+      return res.status(400).json({ error: "Password is required" });
 
     // Parse PFX
     const p12Asn1 = forge.asn1.fromDer(file.buffer.toString("binary"));
     const p12 = forge.pkcs12.pkcs12FromAsn1(p12Asn1, false, password);
-    
+
     // Extract info - very simplified for demo
     let validFrom = new Date();
     let validTo = new Date();
@@ -139,32 +151,35 @@ app.post("/api/certificates/upload", upload.single("pfx"), async (req, res) => {
     let issuer = "Unknown";
     let cpfCnpj = "N/A";
 
-    const bags = p12.getBags({bagType: forge.pki.oids.certBag});
+    const bags = p12.getBags({ bagType: forge.pki.oids.certBag });
     let certBag = bags[forge.pki.oids.certBag]?.[0];
-    
+
     if (certBag && certBag.cert) {
       const cert = certBag.cert;
       validFrom = cert.validity.notBefore;
       validTo = cert.validity.notAfter;
       serial = cert.serialNumber;
-      
+
       const subject = cert.subject.attributes.reduce((acc: any, attr: any) => {
         acc[attr.shortName || attr.name] = attr.value;
         return acc;
       }, {});
-      
-      const issuerAttr = cert.issuer.attributes.reduce((acc: any, attr: any) => {
-        acc[attr.shortName || attr.name] = attr.value;
-        return acc;
-      }, {});
+
+      const issuerAttr = cert.issuer.attributes.reduce(
+        (acc: any, attr: any) => {
+          acc[attr.shortName || attr.name] = attr.value;
+          return acc;
+        },
+        {},
+      );
 
       titular = subject.CN || "Unknown";
       issuer = issuerAttr.CN || issuerAttr.O || "Unknown";
 
       // Basic extraction logic for BR certs
       if (titular.includes(":")) {
-         const parts = titular.split(":");
-         cpfCnpj = parts[parts.length - 1]; // usually contains CPF/CNPJ
+        const parts = titular.split(":");
+        cpfCnpj = parts[parts.length - 1]; // usually contains CPF/CNPJ
       }
     }
 
@@ -180,16 +195,19 @@ app.post("/api/certificates/upload", upload.single("pfx"), async (req, res) => {
       issuer,
       validFrom: validFrom.toISOString(),
       validTo: validTo.toISOString(),
-      type: type as "PF" | "PJ"
+      type: type as "PF" | "PJ",
     };
 
     await db.addCertificate(certificate);
 
     res.json(certificate);
-
   } catch (error: any) {
     console.error(error);
-    res.status(500).json({ error: "Invalid certificate or wrong password. " + error.message });
+    res
+      .status(500)
+      .json({
+        error: "Invalid certificate or wrong password. " + error.message,
+      });
   }
 });
 
@@ -198,17 +216,16 @@ app.delete("/api/certificates/:id", async (req, res) => {
   res.json({ success: true });
 });
 
-
 // Helper execution endpoints
 let activeExecution: {
-    macroId: string,
-    status: 'running' | 'paused' | 'completed' | 'error',
-    currentStepIndex: number,
-    screenshot?: string,
-    currentUrl?: string,
-    logs: string[],
-    _resumeState?: any,
-    currentAction?: { type: string, selector?: string, value?: string }
+  macroId: string;
+  status: "running" | "paused" | "completed" | "error";
+  currentStepIndex: number;
+  screenshot?: string;
+  currentUrl?: string;
+  logs: string[];
+  _resumeState?: any;
+  currentAction?: { type: string; selector?: string; value?: string };
 } | null = null;
 
 app.post("/api/execute/:macroId", async (req, res) => {
@@ -218,15 +235,18 @@ app.post("/api/execute/:macroId", async (req, res) => {
   if (!macro) return res.status(404).json({ error: "Macro not found" });
 
   const companies = await db.getCompanies();
-  const targetCompanies = companies.filter(c => companyIds.includes(c.id));
-  const companyNames = targetCompanies.map(c => c.razaoSocial).join(", ");
+  const targetCompanies = companies.filter((c) => companyIds.includes(c.id));
+  const companyNames = targetCompanies.map((c) => c.razaoSocial).join(", ");
 
   activeExecution = {
-      macroId,
-      status: 'running',
-      currentStepIndex: 0,
-      currentUrl: 'about:blank',
-      logs: [`Started macro ${macro.name}`, `Empresas selecionadas (${targetCompanies.length}): ${companyNames}`]
+    macroId,
+    status: "running",
+    currentStepIndex: 0,
+    currentUrl: "about:blank",
+    logs: [
+      `Started macro ${macro.name}`,
+      `Empresas selecionadas (${targetCompanies.length}): ${companyNames}`,
+    ],
   };
 
   simulateExecution(macro, targetCompanies, 0, 0);
@@ -239,18 +259,24 @@ app.get("/api/execution", (req, res) => {
 });
 
 app.post("/api/execution/resolve-captcha", async (req, res) => {
-  if (activeExecution && activeExecution.status === 'paused') {
+  if (activeExecution && activeExecution.status === "paused") {
     activeExecution.logs.push(`Captcha resolved with: ${req.body.text}`);
-    activeExecution.status = 'running';
-    
+    activeExecution.status = "running";
+
     if (activeExecution._resumeState) {
-        const { macro, targetCompanies, companyIndex, nextStepIndex } = activeExecution._resumeState;
-        simulateExecution(macro, targetCompanies, companyIndex, nextStepIndex + 1);
+      const { macro, targetCompanies, companyIndex, nextStepIndex } =
+        activeExecution._resumeState;
+      simulateExecution(
+        macro,
+        targetCompanies,
+        companyIndex,
+        nextStepIndex + 1,
+      );
     } else {
-        const macro = await db.getMacro(activeExecution.macroId);
-        if (macro) {
-            simulateExecution(macro, [], 0, activeExecution.currentStepIndex + 1);
-        }
+      const macro = await db.getMacro(activeExecution.macroId);
+      if (macro) {
+        simulateExecution(macro, [], 0, activeExecution.currentStepIndex + 1);
+      }
     }
     res.json({ success: true });
   } else {
@@ -258,156 +284,214 @@ app.post("/api/execution/resolve-captcha", async (req, res) => {
   }
 });
 
-function simulateExecution(macro: any, targetCompanies: any[], companyIndex = 0, startIndex = 0) {
-    if (targetCompanies.length > 0 && companyIndex >= targetCompanies.length) {
-        if (activeExecution) {
-            activeExecution.status = 'completed';
-            activeExecution.logs.push("✅ Fim da execução para todas as empresas.");
-        }
-        return;
+function simulateExecution(
+  macro: any,
+  targetCompanies: any[],
+  companyIndex = 0,
+  startIndex = 0,
+) {
+  if (targetCompanies.length > 0 && companyIndex >= targetCompanies.length) {
+    if (activeExecution) {
+      activeExecution.status = "completed";
+      activeExecution.logs.push("✅ Fim da execução para todas as empresas.");
+    }
+    return;
+  }
+
+  const currentCompany =
+    targetCompanies.length > 0 ? targetCompanies[companyIndex] : null;
+  if (startIndex === 0 && activeExecution && currentCompany) {
+    activeExecution.logs.push(
+      `\n▶️ Iniciando para: ${currentCompany.razaoSocial} (${currentCompany.cnpj})`,
+    );
+  }
+
+  let i = startIndex;
+
+  function next() {
+    if (!activeExecution) return;
+    if (i >= macro.steps.length) {
+      activeExecution.logs.push(`✓ Macro finalizada para a empresa atual.`);
+
+      // Simulação de download interceptado via CDP
+      if (currentCompany) {
+        const fakeFile = {
+          id: uuidv4(),
+          filename: `comprovante_${currentCompany.cnpj ? currentCompany.cnpj.replace(/\D/g, "") : Math.random().toString().slice(2, 8)}.pdf`,
+          size: Math.floor(Math.random() * 500000) + 50000,
+          createdAt: new Date().toISOString(),
+          companyId: currentCompany.id,
+          macroId: macro.id,
+        };
+        db.addFile(fakeFile).catch((e) => console.error(e));
+        activeExecution.logs.push(
+          `📥 Download Concluído: O arquivo ${fakeFile.filename} foi salvo na galeria.`,
+        );
+      }
+
+      simulateExecution(macro, targetCompanies, companyIndex + 1, 0);
+      return;
     }
 
-    const currentCompany = targetCompanies.length > 0 ? targetCompanies[companyIndex] : null;
-    if (startIndex === 0 && activeExecution && currentCompany) {
-        activeExecution.logs.push(`\n▶️ Iniciando para: ${currentCompany.razaoSocial} (${currentCompany.cnpj})`);
+    const step = macro.steps[i];
+    activeExecution.currentStepIndex = i;
+
+    let evaluatedValue = step.value;
+    if (evaluatedValue && currentCompany) {
+      evaluatedValue = evaluatedValue
+        .replace(/\{\{CNPJ\}\}/g, currentCompany.cnpj || "")
+        .replace(/\{\{RAZAO_SOCIAL\}\}/g, currentCompany.razaoSocial || "")
+        .replace(/\{\{FANTASIA\}\}/g, currentCompany.nomeFantasia || "")
+        .replace(/\{\{EMAIL\}\}/g, currentCompany.email || "")
+        .replace(/\{\{TELEFONE\}\}/g, currentCompany.telefone || "")
+        .replace(/\{\{IE\}\}/g, currentCompany.inscricaoEstadual || "")
+        .replace(/\{\{IM\}\}/g, currentCompany.inscricaoMunicipal || "");
     }
 
-    let i = startIndex;
-    
-    function next() {
-        if (!activeExecution) return;
-        if (i >= macro.steps.length) {
-            activeExecution.logs.push(`✓ Macro finalizada para a empresa atual.`);
-            simulateExecution(macro, targetCompanies, companyIndex + 1, 0);
-            return;
-        }
+    activeExecution.logs.push(
+      `Executing step ${i + 1}: ${step.type} - ${step.selector || ""} ${evaluatedValue ? `(Value: ${evaluatedValue})` : ""}`,
+    );
 
-        const step = macro.steps[i];
-        activeExecution.currentStepIndex = i;
+    activeExecution.currentAction = {
+      type: step.type,
+      selector: step.selector,
+      value: evaluatedValue,
+    };
 
-        let evaluatedValue = step.value;
-        if (evaluatedValue && currentCompany) {
-            evaluatedValue = evaluatedValue
-                .replace(/\{\{CNPJ\}\}/g, currentCompany.cnpj || '')
-                .replace(/\{\{RAZAO_SOCIAL\}\}/g, currentCompany.razaoSocial || '')
-                .replace(/\{\{FANTASIA\}\}/g, currentCompany.nomeFantasia || '')
-                .replace(/\{\{EMAIL\}\}/g, currentCompany.email || '')
-                .replace(/\{\{TELEFONE\}\}/g, currentCompany.telefone || '')
-                .replace(/\{\{IE\}\}/g, currentCompany.inscricaoEstadual || '')
-                .replace(/\{\{IM\}\}/g, currentCompany.inscricaoMunicipal || '');
-        }
-
-        activeExecution.logs.push(`Executing step ${i+1}: ${step.type} - ${step.selector || ''} ${evaluatedValue ? `(Value: ${evaluatedValue})` : ''}`);
-        
-        activeExecution.currentAction = { type: step.type, selector: step.selector, value: evaluatedValue };
-
-        if (step.type === 'navigate' && evaluatedValue) {
-           activeExecution.currentUrl = evaluatedValue;
-        }
-
-        if (step.type === 'captcha_wait') {
-            activeExecution.status = 'paused';
-            activeExecution.logs.push("Paused. Waiting for manual captcha resolution.");
-            // We would set a screenshot here for real.
-            activeExecution.screenshot = "https://via.placeholder.com/600x200?text=Simulated+Captcha+Screenshot";
-            activeExecution._resumeState = { macro, targetCompanies, companyIndex, nextStepIndex: i };
-            return; // Wait for user to call resolve-captcha
-        }
-
-        let waitTimeMs = 1500;
-        if (step.type === 'wait' && step.waitTime) waitTimeMs = step.waitTime * 1000;
-
-        i++;
-        setTimeout(next, waitTimeMs);
+    if (step.type === "navigate" && evaluatedValue) {
+      activeExecution.currentUrl = evaluatedValue;
     }
 
-    next();
+    if (step.type === "captcha_wait") {
+      activeExecution.status = "paused";
+      activeExecution.logs.push(
+        "Paused. Waiting for manual captcha resolution.",
+      );
+      // We would set a screenshot here for real.
+      activeExecution.screenshot =
+        "https://via.placeholder.com/600x200?text=Simulated+Captcha+Screenshot";
+      activeExecution._resumeState = {
+        macro,
+        targetCompanies,
+        companyIndex,
+        nextStepIndex: i,
+      };
+      return; // Wait for user to call resolve-captcha
+    }
+
+    let waitTimeMs = 1500;
+    if (step.type === "wait" && step.waitTime)
+      waitTimeMs = step.waitTime * 1000;
+
+    i++;
+    setTimeout(next, waitTimeMs);
+  }
+
+  next();
 }
-
 
 // --- PROXY ROUTE FOR RECORDING SIMULATOR ---
 // 1. Raw Passthrough
 app.all("/api/proxy/raw/*", async (req, res) => {
-    let targetUrl = req.originalUrl.replace("/api/proxy/raw/", "");
-    if (!targetUrl.startsWith("http")) return res.status(400).send("Invalid URL");
-    
-    try {
-        console.log(`[Proxy Fetch] ${req.method} ${targetUrl}`);
-        const response = await fetch(targetUrl, {
-          method: req.method,
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
-          } // omit accept headers to avoid issues
-        });
-        
-        res.setHeader("Access-Control-Allow-Origin", "*");
-        response.headers.forEach((value, key) => {
-            const lowerKey = key.toLowerCase();
-            if (lowerKey === 'set-cookie') {
-                // Ensure cookies work in iframe via SameSite=None
-                const cookies = response.headers.getSetCookie();
-                cookies.forEach(cookie => {
-                    let newCookie = cookie.replace(/SameSite=Strict/gi, 'SameSite=None')
-                                           .replace(/SameSite=Lax/gi, 'SameSite=None');
-                    if (!newCookie.toLowerCase().includes('samesite=none')) {
-                        newCookie += '; SameSite=None; Secure';
-                    }
-                    res.append('Set-Cookie', newCookie);
-                    console.log(`[Proxy Cookie] ${newCookie.split('=')[0]} preserved`);
-                });
-            } else if (['content-type', 'content-length', 'cache-control', 'location'].includes(lowerKey)) {
-                res.setHeader(key, value);
-            }
-        });
+  let targetUrl = req.originalUrl.replace("/api/proxy/raw/", "");
+  if (!targetUrl.startsWith("http")) return res.status(400).send("Invalid URL");
 
-        // Do not set Content-Security-Policy or X-Frame-Options to allow iframe usage
+  try {
+    console.log(`[Proxy Fetch] ${req.method} ${targetUrl}`);
+    const response = await fetch(targetUrl, {
+      method: req.method,
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+      }, // omit accept headers to avoid issues
+    });
 
-        const contentType = response.headers.get("content-type") || "";
-        
-        if (contentType.includes("text/css")) {
-            let css = await response.text();
-            // Rewrite url(...) in CSS
-            css = css.replace(/url\((['"]?)([^'"\)]+)(['"]?)\)/gi, (match, q1, url, q2) => {
-                if (url.startsWith("data:")) return match;
-                if (url.startsWith("http://") || url.startsWith("https://")) {
-                    return `url(${q1}/api/proxy/raw/${url}${q2})`;
-                }
-                const absoluteUrl = new URL(url, targetUrl).href;
-                return `url(${q1}/api/proxy/raw/${absoluteUrl}${q2})`;
-            });
-            // Also rewrite @import "..."
-            css = css.replace(/@import\s+(['"])([^'"]+)(['"])/gi, (match, q1, url, q2) => {
-                 if (url.startsWith("http://") || url.startsWith("https://")) {
-                    return `@import ${q1}/api/proxy/raw/${url}${q2}`;
-                }
-                const absoluteUrl = new URL(url, targetUrl).href;
-                return `@import ${q1}/api/proxy/raw/${absoluteUrl}${q2}`;
-            });
-            res.setHeader("Content-Length", Buffer.byteLength(css));
-            return res.send(css);
-        } else if (contentType.includes("javascript") || contentType.includes("ecmascript") || targetUrl.includes(".js")) {
-             let js = await response.text();
-             res.setHeader("Content-Length", Buffer.byteLength(js));
-             res.setHeader("Content-Type", "application/javascript");
-             return res.send(js);
-        } else if (contentType.includes("image/svg+xml")) {
-             let svg = await response.text();
-             // Some naive SVG relative rewrites if needed
-             svg = svg.replace(/(href|src)=["']([^"']+)["']/gi, (match, attr, url) => {
-                 if (url.startsWith("data:") || url.startsWith("#")) return match;
-                 if (url.startsWith("http")) return `${attr}="/api/proxy/raw/${url}"`;
-                 const absoluteUrl = new URL(url, targetUrl).href;
-                 return `${attr}="/api/proxy/raw/${absoluteUrl}"`;
-             });
-             res.setHeader("Content-Length", Buffer.byteLength(svg));
-             return res.send(svg);
-        }
-        
-        const buffer = await response.arrayBuffer();
-        res.send(Buffer.from(buffer));
-    } catch (e: any) {
-        res.status(500).send(`Failed to proxy: ${e.message}`);
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    response.headers.forEach((value, key) => {
+      const lowerKey = key.toLowerCase();
+      if (lowerKey === "set-cookie") {
+        // Ensure cookies work in iframe via SameSite=None
+        const cookies = response.headers.getSetCookie();
+        cookies.forEach((cookie) => {
+          let newCookie = cookie
+            .replace(/SameSite=Strict/gi, "SameSite=None")
+            .replace(/SameSite=Lax/gi, "SameSite=None");
+          if (!newCookie.toLowerCase().includes("samesite=none")) {
+            newCookie += "; SameSite=None; Secure";
+          }
+          res.append("Set-Cookie", newCookie);
+          console.log(`[Proxy Cookie] ${newCookie.split("=")[0]} preserved`);
+        });
+      } else if (
+        [
+          "content-type",
+          "content-length",
+          "cache-control",
+          "location",
+        ].includes(lowerKey)
+      ) {
+        res.setHeader(key, value);
+      }
+    });
+
+    // Do not set Content-Security-Policy or X-Frame-Options to allow iframe usage
+
+    const contentType = response.headers.get("content-type") || "";
+
+    if (contentType.includes("text/css")) {
+      let css = await response.text();
+      // Rewrite url(...) in CSS
+      css = css.replace(
+        /url\((['"]?)([^'"\)]+)(['"]?)\)/gi,
+        (match, q1, url, q2) => {
+          if (url.startsWith("data:")) return match;
+          if (url.startsWith("http://") || url.startsWith("https://")) {
+            return `url(${q1}/api/proxy/raw/${url}${q2})`;
+          }
+          const absoluteUrl = new URL(url, targetUrl).href;
+          return `url(${q1}/api/proxy/raw/${absoluteUrl}${q2})`;
+        },
+      );
+      // Also rewrite @import "..."
+      css = css.replace(
+        /@import\s+(['"])([^'"]+)(['"])/gi,
+        (match, q1, url, q2) => {
+          if (url.startsWith("http://") || url.startsWith("https://")) {
+            return `@import ${q1}/api/proxy/raw/${url}${q2}`;
+          }
+          const absoluteUrl = new URL(url, targetUrl).href;
+          return `@import ${q1}/api/proxy/raw/${absoluteUrl}${q2}`;
+        },
+      );
+      res.setHeader("Content-Length", Buffer.byteLength(css));
+      return res.send(css);
+    } else if (
+      contentType.includes("javascript") ||
+      contentType.includes("ecmascript") ||
+      targetUrl.includes(".js")
+    ) {
+      let js = await response.text();
+      res.setHeader("Content-Length", Buffer.byteLength(js));
+      res.setHeader("Content-Type", "application/javascript");
+      return res.send(js);
+    } else if (contentType.includes("image/svg+xml")) {
+      let svg = await response.text();
+      // Some naive SVG relative rewrites if needed
+      svg = svg.replace(/(href|src)=["']([^"']+)["']/gi, (match, attr, url) => {
+        if (url.startsWith("data:") || url.startsWith("#")) return match;
+        if (url.startsWith("http")) return `${attr}="/api/proxy/raw/${url}"`;
+        const absoluteUrl = new URL(url, targetUrl).href;
+        return `${attr}="/api/proxy/raw/${absoluteUrl}"`;
+      });
+      res.setHeader("Content-Length", Buffer.byteLength(svg));
+      return res.send(svg);
     }
+
+    const buffer = await response.arrayBuffer();
+    res.send(Buffer.from(buffer));
+  } catch (e: any) {
+    res.status(500).send(`Failed to proxy: ${e.message}`);
+  }
 });
 
 // 2. HTML Injector
@@ -417,46 +501,58 @@ app.all("/api/proxy", async (req, res) => {
 
   // Removed Fallback Mode 3
 
-
   try {
     const fetchOptions: RequestInit = {
       method: req.method,
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-        'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
-        ...(req.method === 'POST' && { 'Content-Type': 'application/x-www-form-urlencoded' }),
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+        Accept:
+          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+        ...(req.method === "POST" && {
+          "Content-Type": "application/x-www-form-urlencoded",
+        }),
       },
-      ...(req.method === 'POST' && req.body && { body: new URLSearchParams(req.body as Record<string, string>).toString() }),
-      redirect: 'follow',
+      ...(req.method === "POST" &&
+        req.body && {
+          body: new URLSearchParams(
+            req.body as Record<string, string>,
+          ).toString(),
+        }),
+      redirect: "follow",
     };
 
     const response = await fetch(targetUrl, fetchOptions);
 
     res.setHeader("Access-Control-Allow-Origin", "*");
-    
+
     // Cookie rewrite
     const cookies = response.headers.getSetCookie();
-    cookies.forEach(cookie => {
-        let newCookie = cookie.replace(/SameSite=Strict/gi, 'SameSite=None')
-                               .replace(/SameSite=Lax/gi, 'SameSite=None');
-        if (!newCookie.toLowerCase().includes('samesite=none')) {
-            newCookie += '; SameSite=None; Secure';
-        }
-        res.append('Set-Cookie', newCookie);
+    cookies.forEach((cookie) => {
+      let newCookie = cookie
+        .replace(/SameSite=Strict/gi, "SameSite=None")
+        .replace(/SameSite=Lax/gi, "SameSite=None");
+      if (!newCookie.toLowerCase().includes("samesite=none")) {
+        newCookie += "; SameSite=None; Secure";
+      }
+      res.append("Set-Cookie", newCookie);
     });
 
     response.headers.forEach((value, key) => {
-        const lowerKey = key.toLowerCase();
-        if (['location'].includes(lowerKey)) {
-            // Rewrite location redirects
-             if (value.startsWith("http")) {
-                 res.setHeader(key, `/api/proxy?url=${encodeURIComponent(value)}`);
-             } else {
-                 const absoluteUrl = new URL(value, targetUrl).href;
-                 res.setHeader(key, `/api/proxy?url=${encodeURIComponent(absoluteUrl)}`);
-             }
+      const lowerKey = key.toLowerCase();
+      if (["location"].includes(lowerKey)) {
+        // Rewrite location redirects
+        if (value.startsWith("http")) {
+          res.setHeader(key, `/api/proxy?url=${encodeURIComponent(value)}`);
+        } else {
+          const absoluteUrl = new URL(value, targetUrl).href;
+          res.setHeader(
+            key,
+            `/api/proxy?url=${encodeURIComponent(absoluteUrl)}`,
+          );
         }
+      }
     });
 
     const contentType = response.headers.get("content-type") || "";
@@ -467,44 +563,56 @@ app.all("/api/proxy", async (req, res) => {
     }
 
     let html = await response.text();
-    
+
     // Replace absolute paths (/something) in HTML to force them into the proxy prefix.
     try {
       const origin = new URL(targetUrl).origin;
-      html = html.replace(/(src|href|action|data-src|data-href)="(\/[^"]*)"/gi, `$1="/api/proxy/raw/${origin}$2"`);
-      html = html.replace(/(src|href|action|data-src|data-href)='(\/[^']*)'/gi, `$1='/api/proxy/raw/${origin}$2'`);
-      
+      html = html.replace(
+        /(src|href|action|data-src|data-href)="(\/[^"]*)"/gi,
+        `$1="/api/proxy/raw/${origin}$2"`,
+      );
+      html = html.replace(
+        /(src|href|action|data-src|data-href)='(\/[^']*)'/gi,
+        `$1='/api/proxy/raw/${origin}$2'`,
+      );
+
       // Rewrite srcset
       html = html.replace(/srcset="([^"]+)"/gi, (match, val) => {
-         const parts = val.split(',').map((p: string) => {
-             const [url, size] = p.trim().split(/\s+/);
-             if (!url) return '';
-             if (url.startsWith('http://') || url.startsWith('https://')) {
-                 return `/api/proxy/raw/${url} ${size || ''}`.trim();
-             } else if (url.startsWith('/')) {
-                 return `/api/proxy/raw/${origin}${url} ${size || ''}`.trim();
-             }
-             return `${url} ${size || ''}`.trim();
-         });
-         return `srcset="${parts.join(', ')}"`;
+        const parts = val.split(",").map((p: string) => {
+          const [url, size] = p.trim().split(/\s+/);
+          if (!url) return "";
+          if (url.startsWith("http://") || url.startsWith("https://")) {
+            return `/api/proxy/raw/${url} ${size || ""}`.trim();
+          } else if (url.startsWith("/")) {
+            return `/api/proxy/raw/${origin}${url} ${size || ""}`.trim();
+          }
+          return `${url} ${size || ""}`.trim();
+        });
+        return `srcset="${parts.join(", ")}"`;
       });
     } catch (e) {
       // Ignored
     }
 
     // Rewrite absolute HTTP/HTTPS links so they use our proxy
-    html = html.replace(/(src|href|action|data-src|data-href)="([^"]*)"/gi, (match, attr, val) => {
-      if (val.startsWith("http://") || val.startsWith("https://")) {
-        return `${attr}="/api/proxy?url=${encodeURIComponent(val)}"`;
-      }
-      return match;
-    });
-    html = html.replace(/(src|href|action|data-src|data-href)='([^']*)'/gi, (match, attr, val) => {
-      if (val.startsWith("http://") || val.startsWith("https://")) {
-        return `${attr}='/api/proxy?url=${encodeURIComponent(val)}'`;
-      }
-      return match;
-    });
+    html = html.replace(
+      /(src|href|action|data-src|data-href)="([^"]*)"/gi,
+      (match, attr, val) => {
+        if (val.startsWith("http://") || val.startsWith("https://")) {
+          return `${attr}="/api/proxy?url=${encodeURIComponent(val)}"`;
+        }
+        return match;
+      },
+    );
+    html = html.replace(
+      /(src|href|action|data-src|data-href)='([^']*)'/gi,
+      (match, attr, val) => {
+        if (val.startsWith("http://") || val.startsWith("https://")) {
+          return `${attr}='/api/proxy?url=${encodeURIComponent(val)}'`;
+        }
+        return match;
+      },
+    );
 
     // Inject click interception script
     const script = `
@@ -707,23 +815,35 @@ app.all("/api/proxy", async (req, res) => {
     </script>
     <base href="/api/proxy/raw/${targetUrl}">
     `;
-    
-    if (html.toLowerCase().includes('<head>')) {
-      html = html.replace(/<head>/i, '<head>' + script);
+
+    if (html.toLowerCase().includes("<head>")) {
+      html = html.replace(/<head>/i, "<head>" + script);
     } else {
       html = script + html;
     }
-    
+
     res.send(html);
   } catch (e: any) {
     let isCertError = false;
     const msg = e.message ? e.message.toLowerCase() : "";
-    if (msg.includes("certificate") || msg.includes("ssl") || msg.includes("tls") || msg.includes("econnreset")) {
+    if (
+      msg.includes("certificate") ||
+      msg.includes("ssl") ||
+      msg.includes("tls") ||
+      msg.includes("econnreset")
+    ) {
       isCertError = true;
     }
-    if (e.cause && typeof e.cause.code === 'string') {
+    if (e.cause && typeof e.cause.code === "string") {
       const code = e.cause.code.toUpperCase();
-      if (['ERR_TLS_CERT_ALTNAME_INVALID', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'CERT_HAS_EXPIRED', 'ECONNRESET'].includes(code)) {
+      if (
+        [
+          "ERR_TLS_CERT_ALTNAME_INVALID",
+          "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+          "CERT_HAS_EXPIRED",
+          "ECONNRESET",
+        ].includes(code)
+      ) {
         isCertError = true;
       }
     }
