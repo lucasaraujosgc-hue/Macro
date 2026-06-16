@@ -206,7 +206,8 @@ let activeExecution: {
     currentStepIndex: number,
     screenshot?: string,
     currentUrl?: string,
-    logs: string[]
+    logs: string[],
+    _resumeState?: any
 } | null = null;
 
 app.post("/api/execute/:macroId", async (req, res) => {
@@ -227,7 +228,7 @@ app.post("/api/execute/:macroId", async (req, res) => {
       logs: [`Started macro ${macro.name}`, `Empresas selecionadas (${targetCompanies.length}): ${companyNames}`]
   };
 
-  simulateExecution(macro);
+  simulateExecution(macro, targetCompanies, 0, 0);
 
   res.json({ success: true, execution: activeExecution });
 });
@@ -240,10 +241,15 @@ app.post("/api/execution/resolve-captcha", async (req, res) => {
   if (activeExecution && activeExecution.status === 'paused') {
     activeExecution.logs.push(`Captcha resolved with: ${req.body.text}`);
     activeExecution.status = 'running';
-    activeExecution.currentStepIndex++;
-    const macro = await db.getMacro(activeExecution.macroId);
-    if (macro) {
-        simulateExecution(macro, activeExecution.currentStepIndex);
+    
+    if (activeExecution._resumeState) {
+        const { macro, targetCompanies, companyIndex, nextStepIndex } = activeExecution._resumeState;
+        simulateExecution(macro, targetCompanies, companyIndex, nextStepIndex + 1);
+    } else {
+        const macro = await db.getMacro(activeExecution.macroId);
+        if (macro) {
+            simulateExecution(macro, [], 0, activeExecution.currentStepIndex + 1);
+        }
     }
     res.json({ success: true });
   } else {
@@ -251,23 +257,49 @@ app.post("/api/execution/resolve-captcha", async (req, res) => {
   }
 });
 
-function simulateExecution(macro: any, startIndex = 0) {
+function simulateExecution(macro: any, targetCompanies: any[], companyIndex = 0, startIndex = 0) {
+    if (targetCompanies.length > 0 && companyIndex >= targetCompanies.length) {
+        if (activeExecution) {
+            activeExecution.status = 'completed';
+            activeExecution.logs.push("✅ Fim da execução para todas as empresas.");
+        }
+        return;
+    }
+
+    const currentCompany = targetCompanies.length > 0 ? targetCompanies[companyIndex] : null;
+    if (startIndex === 0 && activeExecution && currentCompany) {
+        activeExecution.logs.push(`\n▶️ Iniciando para: ${currentCompany.razaoSocial} (${currentCompany.cnpj})`);
+    }
+
     let i = startIndex;
     
     function next() {
         if (!activeExecution) return;
         if (i >= macro.steps.length) {
-            activeExecution.status = 'completed';
-            activeExecution.logs.push("Execution completed successfully.");
+            activeExecution.logs.push(`✓ Macro finalizada para a empresa atual.`);
+            simulateExecution(macro, targetCompanies, companyIndex + 1, 0);
             return;
         }
 
         const step = macro.steps[i];
         activeExecution.currentStepIndex = i;
-        activeExecution.logs.push(`Executing step ${i+1}: ${step.type} - ${step.selector || step.value || ''}`);
 
-        if (step.type === 'navigate' && step.value) {
-           activeExecution.currentUrl = step.value;
+        let evaluatedValue = step.value;
+        if (evaluatedValue && currentCompany) {
+            evaluatedValue = evaluatedValue
+                .replace(/\{\{CNPJ\}\}/g, currentCompany.cnpj || '')
+                .replace(/\{\{RAZAO_SOCIAL\}\}/g, currentCompany.razaoSocial || '')
+                .replace(/\{\{FANTASIA\}\}/g, currentCompany.nomeFantasia || '')
+                .replace(/\{\{EMAIL\}\}/g, currentCompany.email || '')
+                .replace(/\{\{TELEFONE\}\}/g, currentCompany.telefone || '')
+                .replace(/\{\{IE\}\}/g, currentCompany.inscricaoEstadual || '')
+                .replace(/\{\{IM\}\}/g, currentCompany.inscricaoMunicipal || '');
+        }
+
+        activeExecution.logs.push(`Executing step ${i+1}: ${step.type} - ${step.selector || ''} ${evaluatedValue ? `(Value: ${evaluatedValue})` : ''}`);
+
+        if (step.type === 'navigate' && evaluatedValue) {
+           activeExecution.currentUrl = evaluatedValue;
         }
 
         if (step.type === 'captcha_wait') {
@@ -275,6 +307,7 @@ function simulateExecution(macro: any, startIndex = 0) {
             activeExecution.logs.push("Paused. Waiting for manual captcha resolution.");
             // We would set a screenshot here for real.
             activeExecution.screenshot = "https://via.placeholder.com/600x200?text=Simulated+Captcha+Screenshot";
+            activeExecution._resumeState = { macro, targetCompanies, companyIndex, nextStepIndex: i };
             return; // Wait for user to call resolve-captcha
         }
 
