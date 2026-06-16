@@ -1,17 +1,33 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { MonitorPlay, ShieldAlert, Cpu } from "lucide-react";
 
 export default function Execution() {
   const [execution, setExecution] = useState<any>(null);
   const [captchaText, setCaptchaText] = useState("");
+  const lastStepRef = useRef<number>(-1);
 
   const loadExecution = () => fetch("/api/execution").then(r => r.json()).then(setExecution);
 
   useEffect(() => {
     loadExecution();
-    const interval = setInterval(loadExecution, 2000);
+    const interval = setInterval(loadExecution, 500);
     return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    if (execution && execution.status === 'running' && execution.currentAction && execution.currentStepIndex > lastStepRef.current) {
+        lastStepRef.current = execution.currentStepIndex;
+        const iframe = document.getElementById("execution-proxy-iframe") as HTMLIFrameElement;
+        if (iframe && iframe.contentWindow) {
+            iframe.contentWindow.postMessage({
+                type: 'simulate_execution_action',
+                action: execution.currentAction
+            }, '*');
+        }
+    } else if (!execution || execution.status === 'completed') {
+        lastStepRef.current = -1;
+    }
+  }, [execution]);
 
   const resolveCaptcha = async () => {
     if(!captchaText) return;
@@ -92,8 +108,9 @@ export default function Execution() {
                    // we show the proxy iframe or a mocked scanner overlay on top of the iframe.
                    <div className="w-full h-full relative">
                        <iframe 
+                           id="execution-proxy-iframe"
                            src={`/api/proxy?url=${encodeURIComponent(execution.currentUrl)}&topLevel=true`} 
-                           className="w-full h-full border-none opacity-50 grayscale select-none pointer-events-none"
+                           className="w-full h-full border-none select-none pointer-events-none transition-all duration-300 backdrop-blur-sm"
                            title="Browser Simulador"
                        />
                        {/* Removing 'Coletando Dados' overlay as requested */}

@@ -207,7 +207,8 @@ let activeExecution: {
     screenshot?: string,
     currentUrl?: string,
     logs: string[],
-    _resumeState?: any
+    _resumeState?: any,
+    currentAction?: { type: string, selector?: string, value?: string }
 } | null = null;
 
 app.post("/api/execute/:macroId", async (req, res) => {
@@ -297,6 +298,8 @@ function simulateExecution(macro: any, targetCompanies: any[], companyIndex = 0,
         }
 
         activeExecution.logs.push(`Executing step ${i+1}: ${step.type} - ${step.selector || ''} ${evaluatedValue ? `(Value: ${evaluatedValue})` : ''}`);
+        
+        activeExecution.currentAction = { type: step.type, selector: step.selector, value: evaluatedValue };
 
         if (step.type === 'navigate' && evaluatedValue) {
            activeExecution.currentUrl = evaluatedValue;
@@ -665,6 +668,41 @@ app.all("/api/proxy", async (req, res) => {
               window.parent.postMessage({ type: 'recorder_navigate', url: url }, '*');
           }
         }, true);
+
+        // Listener for executing simulated actions from the parent React app
+        window.addEventListener('message', function(e) {
+             if (e.data && e.data.type === 'simulate_execution_action') {
+                 var action = e.data.action;
+                 if (!action || !action.selector) return;
+                 var el = document.querySelector(action.selector);
+                 if (!el) {
+                    console.log("[Proxy] Element not found for simulation:", action.selector);
+                    return;
+                 }
+                 
+                 // Highlight visually 
+                 var origOutline = el.style.outline;
+                 var origTransition = el.style.transition;
+                 el.style.transition = 'outline 0.1s ease-in-out';
+                 el.style.outline = '4px solid #ef4444';
+                 
+                 setTimeout(function() {
+                     el.style.outline = origOutline;
+                     el.style.transition = origTransition;
+                 }, 600);
+
+                 if (action.type === 'click') {
+                     // Try to trigger a real click
+                     try { el.click(); } catch (err) {}
+                 } else if (action.type === 'type') {
+                     try {
+                         el.value = action.value || '';
+                         el.dispatchEvent(new Event('input', { bubbles: true }));
+                         el.dispatchEvent(new Event('change', { bubbles: true }));
+                     } catch (err) {}
+                 }
+             }
+        });
       })();
     </script>
     <base href="/api/proxy/raw/${targetUrl}">
