@@ -347,7 +347,12 @@ export default function Macros() {
                                   selector = target.tagName.toLowerCase();
                                   if (safeClasses.length) selector += '.' + safeClasses.join('.');
                                 }
-                                addStep('click', { selector });
+                                const isInput = ['input', 'textarea', 'select'].includes(target.tagName.toLowerCase());
+                                if (isInput) {
+                                  addStep('type', { selector, value: '' });
+                                } else {
+                                  addStep('click', { selector });
+                                }
                            }}>
                                 <div className="flex justify-between items-center mb-10 border-b pb-4">
                                     <div className="flex items-center space-x-3">
