@@ -379,26 +379,8 @@ app.all("/api/proxy", async (req, res) => {
   const targetUrl = req.query.url as string;
   if (!targetUrl) return res.status(400).send("No URL");
 
-  // Fallback Mode 3 - Automatic Playwright detection for complex sites
-  const isTopLevel = req.query.topLevel === 'true';
-  if (isTopLevel && (targetUrl.includes("gov.br") || targetUrl.includes("receita.fazenda") || targetUrl.includes("cav.receita") || targetUrl.includes("sefaz"))) {
-      return res.send(`
-         <html>
-         <body>
-             <div style="padding: 20px; font-family: sans-serif; text-align: center; color: white; background: #1e1e2f; border-radius: 8px;">
-                 <h2>⚠️ Sessão Segura Necessária (Playwright)</h2>
-                 <p>Sites governamentais e sistemas com certificado digital requerem um ambiente remoto avançado.</p>
-                 <p>Iniciando container Playwright isolado...</p>
-                 <script>
-                     setTimeout(function() {
-                        window.parent.postMessage({ type: 'recorder_requires_playwright', url: '${targetUrl}' }, '*');
-                     }, 1500);
-                 </script>
-             </div>
-         </body>
-         </html>
-      `);
-  }
+  // Removed Fallback Mode 3
+
 
   try {
     const fetchOptions: RequestInit = {
