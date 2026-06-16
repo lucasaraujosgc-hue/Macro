@@ -819,9 +819,7 @@ app.all("/api/proxy", async (req, res) => {
       const buffer = await response.arrayBuffer();
       const data = Buffer.from(buffer);
       let filename = "arquivo.pdf";
-      const fnMatch = contentDisposition.match(/filename[^;=
-]*=(['"]?)([^;
-]*)\1/i);
+      const fnMatch = contentDisposition.match(/filename[^;=\n]*=(['"]?)([^;\n]*)\1/i);
       if (fnMatch?.[2]) filename = decodeURIComponent(fnMatch[2].replace(/['"]/g, "").trim());
 
       const captured: CapturedFile = {
