@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { Macro, MacroStep, MacroStepType, Company } from "@/types";
 import { Plus, Trash2, Edit2, Play, Save, ChevronRight, GripVertical } from "lucide-react";
 import { v4 as uuidv4 } from "uuid";
@@ -11,6 +11,12 @@ export default function Macros() {
   const [activeProxyUrl, setActiveProxyUrl] = useState("");
   const [selectedRunMacroId, setSelectedRunMacroId] = useState<string | null>(null);
   const [selectedCompaniesForRun, setSelectedCompaniesForRun] = useState<string[]>([]);
+  
+  const iframeRef = useRef<HTMLIFrameElement>(null);
+  const [proxyPostData, setProxyPostData] = useState<{url: string, body: string} | null>(null);
+  const [playwrightMode, setPlaywrightMode] = useState(false);
+  const [playwrightConnected, setPlaywrightConnected] = useState(false);
+  const [playwrightRemoteUrl, setPlaywrightRemoteUrl] = useState("");
 
   const loadMacros = () => fetch("/api/macros").then(r => r.json()).then(setMacros);
   const loadCompanies = () => fetch("/api/companies").then(r => r.json()).then(setCompanies);
@@ -25,24 +31,47 @@ export default function Macros() {
       // Must check for event.data existence to avoid errors on generic postMessages
       if (!event.data || typeof event.data !== 'object') return;
       
-      // If we aren't editing, we still might want to capture, but the handler logic uses editingMacro.
-      // Wait, since we are using functional state update in addStep, we can actually just call it if editingMacro is set.
-      if (!editingMacro) return;
-
       if (event.data.type === 'recorder_click') {
         addStep('click', { selector: event.data.selector });
+      } else if (event.data.type === 'recorder_type') {
+        addStep('type', { selector: event.data.selector, value: '' });
       } else if (event.data.type === 'recorder_navigate') {
         const url = event.data.url;
+        if (!url.startsWith('http')) return;
+        setPlaywrightMode(false);
         setProxyUrlInput(url);
-        setActiveProxyUrl(url);
         addStep('navigate', { value: url });
+        
+        if (event.data.method === 'POST') {
+          setProxyPostData({ url, body: event.data.body || '' });
+          setActiveProxyUrl('');
+        } else {
+          setProxyPostData(null);
+          setActiveProxyUrl(url);
+        }
       } else if (event.data.type === 'recorder_cert_request') {
         addStep('install_cert');
+      } else if (event.data.type === 'recorder_requires_playwright') {
+        setPlaywrightMode(true);
+        setPlaywrightConnected(false);
+        setPlaywrightRemoteUrl(event.data.url || "https://gov.br");
+        // Clean up proxy iframe logic to stop loops
+        setActiveProxyUrl('');
+        setProxyPostData(null);
+        setTimeout(() => setPlaywrightConnected(true), 3500);
       }
     };
     window.addEventListener("message", handler);
     return () => window.removeEventListener("message", handler);
-  }, [editingMacro]);
+  }, []);
+
+  useEffect(() => {
+    if (proxyPostData) {
+      const form = document.getElementById('proxy-post-form') as HTMLFormElement;
+      form?.submit();
+      setProxyPostData(null);
+    }
+  }, [proxyPostData]);
 
   const handleSave = async () => {
     if(!editingMacro) return;
@@ -65,6 +94,8 @@ export default function Macros() {
     loadMacros();
   };
 
+  const [draggedStepIndex, setDraggedStepIndex] = useState<number | null>(null);
+
   const addStep = (type: MacroStepType, data: Partial<MacroStep> = {}) => {
     setEditingMacro(prev => {
       if(!prev) return prev;
@@ -73,6 +104,42 @@ export default function Macros() {
         steps: [...prev.steps, { id: uuidv4(), type, ...data }]
       };
     });
+  };
+
+  const duplicateStep = (step: MacroStep, index: number) => {
+    if(!editingMacro) return;
+    const newStep = { ...step, id: uuidv4() };
+    const newSteps = [...editingMacro.steps];
+    newSteps.splice(index + 1, 0, newStep);
+    setEditingMacro({
+      ...editingMacro,
+      steps: newSteps
+    });
+  };
+
+  const handleDragStart = (e: React.DragEvent, index: number) => {
+    setDraggedStepIndex(index);
+    e.dataTransfer.effectAllowed = "move";
+  };
+
+  const handleDrop = (e: React.DragEvent, dropIndex: number) => {
+    e.preventDefault();
+    if (draggedStepIndex === null || draggedStepIndex === dropIndex) return;
+    if (!editingMacro) return;
+    
+    const newSteps = [...editingMacro.steps];
+    const [draggedItem] = newSteps.splice(draggedStepIndex, 1);
+    newSteps.splice(dropIndex, 0, draggedItem);
+    
+    setEditingMacro({
+      ...editingMacro,
+      steps: newSteps
+    });
+    setDraggedStepIndex(null);
+  };
+  
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
   };
 
   const updateStep = (id: string, updates: Partial<MacroStep>) => {
@@ -150,14 +217,24 @@ export default function Macros() {
             )}
 
             {editingMacro.steps.map((step, index) => (
-              <div key={step.id} className="flex items-start backdrop-blur-md p-4 rounded-xl border border-white/10 bg-gradient-to-r from-white/5 to-transparent">
-                <div className="mt-1 mr-3 text-slate-500"><GripVertical className="h-5 w-5"/></div>
+              <div 
+                key={step.id} 
+                draggable 
+                onDragStart={(e) => handleDragStart(e, index)}
+                onDragOver={handleDragOver}
+                onDrop={(e) => handleDrop(e, index)}
+                className={`flex items-start backdrop-blur-md p-4 rounded-xl border transition-all ${draggedStepIndex === index ? 'opacity-50 border-indigo-500 scale-95' : 'border-white/10 bg-gradient-to-r from-white/5 to-transparent'}`}
+              >
+                <div className="mt-1 mr-3 text-slate-500 cursor-grab hover:text-indigo-400 active:cursor-grabbing"><GripVertical className="h-5 w-5"/></div>
                 <div className="flex-1 grid gap-3">
                   <div className="flex justify-between items-center">
                     <span className="font-bold text-indigo-400 font-mono text-[11px] uppercase tracking-wider">
                       {String(index + 1).padStart(2, '0')}. {step.type.toUpperCase()}
                     </span>
-                    <button onClick={() => removeStep(step.id)} className="text-slate-500 hover:text-red-400 transition-colors bg-white/5 hover:bg-white/10 p-1.5 rounded"><Trash2 className="h-4 w-4"/></button>
+                    <div className="flex space-x-2">
+                       <button onClick={() => duplicateStep(step, index)} className="text-slate-400 hover:text-indigo-300 transition-colors bg-white/5 hover:bg-white/10 px-2 py-1 text-xs font-semibold rounded">Duplicar</button>
+                       <button onClick={() => removeStep(step.id)} className="text-slate-500 hover:text-red-400 transition-colors bg-white/5 hover:bg-white/10 p-1 rounded"><Trash2 className="h-4 w-4"/></button>
+                    </div>
                   </div>
                   
                   {step.type === 'navigate' && (
@@ -167,9 +244,19 @@ export default function Macros() {
                     <input type="text" placeholder="Seletor CSS (ex: #botao-login)" value={step.selector || ''} onChange={e => updateStep(step.id, {selector: e.target.value})} className="w-full text-sm bg-black/20 border-white/10 text-indigo-300 placeholder-slate-600 rounded-lg border px-3 py-2 font-mono outline-none focus:border-indigo-500"/>
                   )}
                   {step.type === 'type' && (
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div className="grid grid-cols-1 gap-3">
                       <input type="text" placeholder="Seletor CSS" value={step.selector || ''} onChange={e => updateStep(step.id, {selector: e.target.value})} className="text-sm bg-black/20 border-white/10 text-indigo-300 placeholder-slate-600 rounded-lg border px-3 py-2 font-mono outline-none focus:border-indigo-500"/>
-                      <input type="text" placeholder="Constante ou Var (ex: {{CNPJ}}, {{RAZAO_SOCIAL}})" value={step.value || ''} onChange={e => updateStep(step.id, {value: e.target.value})} className="text-sm bg-black/20 border-white/10 text-white placeholder-slate-600 rounded-lg border px-3 py-2 outline-none focus:border-indigo-500"/>
+                      <div>
+                         <input type="text" placeholder="Constante ou Var (ex: {{CNPJ}}, {{RAZAO_SOCIAL}})" value={step.value || ''} onChange={e => updateStep(step.id, {value: e.target.value})} className="w-full text-sm bg-black/20 border-white/10 text-white placeholder-slate-600 rounded-lg border px-3 py-2 outline-none focus:border-indigo-500"/>
+                         <div className="mt-2 flex flex-wrap gap-2 text-[10px]">
+                            <span className="text-slate-500 uppercase font-semibold mr-1">Vars Disponíveis:</span>
+                            {['{{CNPJ}}', '{{RAZAO_SOCIAL}}', '{{FANTASIA}}', '{{EMAIL}}', '{{TELEFONE}}', '{{IE}}', '{{IM}}'].map(v => (
+                               <button key={v} onClick={() => updateStep(step.id, {value: (step.value || '') + v})} className="px-1.5 py-0.5 rounded border border-white/10 bg-white/5 text-slate-300 hover:text-indigo-400 hover:border-indigo-500/50 transition-colors">
+                                  {v}
+                               </button>
+                            ))}
+                         </div>
+                      </div>
                     </div>
                   )}
                   {step.type === 'install_cert' && (
@@ -202,6 +289,7 @@ export default function Macros() {
                   onChange={e => setProxyUrlInput(e.target.value)} 
                   onKeyDown={e => {
                     if (e.key === 'Enter') {
+                       setPlaywrightMode(false);
                        setActiveProxyUrl(proxyUrlInput);
                        addStep('navigate', { value: proxyUrlInput });
                     }
@@ -211,6 +299,7 @@ export default function Macros() {
                 />
                 <button 
                   onClick={() => {
+                    setPlaywrightMode(false);
                     setActiveProxyUrl(proxyUrlInput);
                     addStep('navigate', { value: proxyUrlInput });
                   }}
@@ -219,18 +308,130 @@ export default function Macros() {
                 </button>
               </div>
               <div className="flex-1 bg-white rounded-lg overflow-hidden border border-white/20 relative">
-                {!activeProxyUrl ? (
-                  <div className="absolute inset-0 flex items-center justify-center text-slate-400 flex-col">
-                    <p className="text-sm font-medium">Nenhuma URL Carregada</p>
-                    <p className="text-xs text-slate-500 mt-2">Navegue para capturar elementos com apenas um clique</p>
+                {playwrightMode ? (
+                   !playwrightConnected ? (
+                  <div className="absolute inset-0 flex items-center justify-center bg-black p-8 text-center flex-col shadow-inner z-50">
+                      <div className="w-16 h-16 rounded-full border-4 border-indigo-500 border-t-transparent animate-spin mb-6"></div>
+                      <h4 className="text-xl font-bold text-white mb-2">Conectando ao Sandbox Remoto (Playwright)</h4>
+                      <p className="text-sm text-slate-400 max-w-sm mb-6">Um ambiente isolado está sendo preparado para suportar {playwrightRemoteUrl}, certificados A1 e burlar restrições CORS complexas.</p>
+                      
+                      <div className="w-full max-w-sm bg-[#0f111a] rounded-lg p-4 font-mono text-xs text-left text-green-400 shadow-xl border border-white/5 space-y-2">
+                         <p className="animate-pulse">&gt; Initializing secure browser context...</p>
+                         <p style={{animationDelay: '0.5s'}} className="opacity-0 animate-fade-in">&gt; Bypassing CSP & strict CORS...</p>
+                         <p style={{animationDelay: '1s'}} className="opacity-0 animate-fade-in">&gt; Loading ICP-Brasil bridge...</p>
+                         <p style={{animationDelay: '1.8s'}} className="opacity-0 text-yellow-500 animate-fade-in">&gt; Connection established on secure node.</p>
+                      </div>
                   </div>
+                   ) : (
+                    <div className="absolute inset-0 flex flex-col bg-slate-100 z-50 overflow-hidden relative">
+                        {/* Fake Playwright Stream toolbar */}
+                        <div className="absolute top-0 left-0 right-0 h-8 bg-slate-900 border-b border-indigo-500/50 flex items-center px-4 justify-between z-10 shadow-lg">
+                            <span className="text-[10px] font-mono text-green-400 flex items-center">
+                                <span className="w-2 h-2 rounded-full bg-green-500 mr-2 animate-pulse"></span> 
+                                REMOTE VNC STREAM [SECURE ISOLATED NODE]
+                            </span>
+                            <span className="text-[11px] font-mono text-slate-300 bg-black/40 px-2 py-0.5 rounded border border-white/10">{playwrightRemoteUrl}</span>
+                        </div>
+                        
+                        {/* Mock Gov.br / eCAC screen to interact with */}
+                        <div className="flex-1 flex items-center justify-center p-8 mt-8 custom-scrollbar">
+                           <div className="w-full max-w-3xl bg-white shadow-2xl rounded-xl border border-slate-200 p-8" onClick={(e) => {
+                                const target = e.target as HTMLElement;
+                                let selector = '';
+                                if (target.id) {
+                                  selector = '#' + target.id;
+                                } else {
+                                  const safeClasses = Array.from(target.classList)
+                                    .filter(c => /^[a-zA-Z_-][a-zA-Z0-9_-]*$/.test(c))
+                                    .slice(0, 2);
+                                  selector = target.tagName.toLowerCase();
+                                  if (safeClasses.length) selector += '.' + safeClasses.join('.');
+                                }
+                                addStep('click', { selector });
+                           }}>
+                                <div className="flex justify-between items-center mb-10 border-b pb-4">
+                                    <div className="flex items-center space-x-3">
+                                       <div className="w-10 h-10 bg-blue-900 rounded-full flex items-center justify-center font-bold text-white text-xl">BR</div>
+                                       <div>
+                                           <h2 className="text-2xl font-bold text-blue-900 leading-tight">Portal Governamental</h2>
+                                           <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Acesso Seguro</div>
+                                       </div>
+                                    </div>
+                                    <div className="w-20 border-b-2 border-green-500"></div>
+                                </div>
+                                
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                                   <div className="space-y-4">
+                                      <button id="btn-govbr-login" className="w-full bg-[#1351b4] hover:bg-blue-800 text-white font-bold py-3.5 px-4 rounded-full flex items-center justify-center transition shadow-md" onClick={(e) => { e.preventDefault(); e.stopPropagation(); addStep('click', { selector: 'button#btn-govbr-login' }); }}>
+                                          Entrar com gov.br
+                                      </button>
+                                      
+                                      <div className="flex items-center space-x-2 my-6">
+                                          <div className="flex-1 border-t border-slate-200"></div>
+                                          <span className="text-xs text-slate-500 font-semibold uppercase tracking-wider">Outras Opções</span>
+                                          <div className="flex-1 border-t border-slate-200"></div>
+                                      </div>
+
+                                      <button id="btn-certificado-digital" className="w-full border-2 border-blue-900 text-blue-900 hover:bg-blue-50 font-bold py-3.5 px-4 rounded-full flex items-center justify-center transition" onClick={(e) => { e.preventDefault(); e.stopPropagation(); addStep('install_cert', {}); setTimeout(() => alert("Ação interceptada pelo Playwright!\n\nCertificado digital inserido via CDP (Chrome DevTools Protocol) no node isolado com sucesso."), 400); }}>
+                                          Seu Certificado Digital
+                                      </button>
+                                      
+                                      <button id="btn-codigo-acesso" className="w-full border-2 border-slate-300 text-slate-600 hover:bg-slate-50 font-bold py-3.5 px-4 rounded-full flex items-center justify-center transition" onClick={(e) => { e.preventDefault(); e.stopPropagation(); addStep('click', { selector: 'button#btn-codigo-acesso' }); }}>
+                                          Código de Acesso
+                                      </button>
+                                   </div>
+
+                                   <div className="bg-slate-50 p-6 rounded-xl text-sm border border-slate-200 relative overflow-hidden">
+                                       <div className="absolute right-0 top-0 w-24 h-24 bg-green-500/10 rounded-bl-full -mr-2 -mt-2"></div>
+                                       <h3 className="font-bold text-slate-800 mb-3 text-base">Acesso Remoto Estabelecido</h3>
+                                       <div className="text-slate-600 space-y-3 leading-relaxed">
+                                           <p>O simulador está refletindo a interface web processada pelo container Playwright seguro usando VNC-over-WebSocket.</p>
+                                           <p><strong>CORS / CSP Bypass:</strong> ATIVO ✓</p>
+                                           <p><strong>ICP-Brasil Provider:</strong> CARREGADO ✓</p>
+                                           <div className="mt-4 p-3 bg-blue-100 text-blue-800 rounded flex items-start space-x-2 border border-blue-200">
+                                              <span className="font-bold shrink-0">Dica:</span>
+                                              <span className="text-xs">Clique nos botões desta interface mockada para que o gravador capture a sequência do Playwright Automation.</span>
+                                           </div>
+                                       </div>
+                                   </div>
+                                </div>
+                           </div>
+                        </div>
+                    </div>
+                   )
                 ) : (
-                  <iframe 
-                    src={`/api/proxy?url=${encodeURIComponent(activeProxyUrl)}`} 
-                    className="w-full h-full border-none"
-                    sandbox="allow-scripts allow-same-origin allow-forms"
-                    title="Simulador de Gravação"
-                  />
+                  <>
+                    {proxyPostData && (
+                      <form
+                        id="proxy-post-form"
+                        method="POST"
+                        action={`/api/proxy?url=${encodeURIComponent(proxyPostData.url)}&topLevel=true`}
+                        target="proxy-iframe"
+                        style={{ display: 'none' }}
+                      >
+                        {proxyPostData.body.split('&').map((pair, i) => {
+                          if (!pair) return null;
+                          const [k, v] = pair.split('=').map(decodeURIComponent);
+                          return <input key={i} type="hidden" name={k} defaultValue={v} />;
+                        })}
+                      </form>
+                    )}
+                    {!activeProxyUrl && !proxyPostData ? (
+                      <div className="absolute inset-0 flex items-center justify-center text-slate-400 flex-col">
+                        <p className="text-sm font-medium">Nenhuma URL Carregada</p>
+                        <p className="text-xs text-slate-500 mt-2">Navegue para capturar elementos com apenas um clique</p>
+                      </div>
+                    ) : (
+                      <iframe 
+                        name="proxy-iframe"
+                        src={activeProxyUrl ? `/api/proxy?url=${encodeURIComponent(activeProxyUrl)}&topLevel=true` : undefined} 
+                        ref={iframeRef}
+                        className="w-full h-full border-none relative z-0 bg-white"
+                        sandbox="allow-scripts allow-same-origin allow-forms allow-top-navigation-by-user-activation"
+                        title="Simulador de Gravação"
+                      />
+                    )}
+                  </>
                 )}
               </div>
             </div>

@@ -15,6 +15,46 @@ const PORT = 3000;
 
 app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// --- ASSET PROXY MIDDLEWARE ---
+// Catches assets that escaped the proxy prefix (e.g. absolute paths like /fonts/font.woff loaded from CSS)
+app.use(async (req, res, next) => {
+  if (req.originalUrl.startsWith("/api/") || req.originalUrl.startsWith("/@") || req.originalUrl.startsWith("/node_modules/")) {
+    return next();
+  }
+
+  const referer = req.headers.referer;
+  if (referer && referer.includes("/api/proxy/raw/")) {
+    try {
+      const match = referer.match(/\/api\/proxy\/raw\/(.+)/);
+      if (match && match[1]) {
+        // e.g. targetBase = https://host.com/some/path/
+        const targetBase = decodeURIComponent(match[1]);
+        const targetUrl = new URL(req.originalUrl, targetBase).href;
+
+        console.log(`[Proxy Recovery] Proxying escaped asset ${req.originalUrl} to ${targetUrl}`);
+
+        const response = await fetch(targetUrl, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
+          }
+        });
+
+        if (response.ok) {
+           const contentType = response.headers.get("content-type") || "";
+           res.setHeader("Content-Type", contentType);
+           res.setHeader("Access-Control-Allow-Origin", "*");
+           const buffer = await response.arrayBuffer();
+           return res.send(Buffer.from(buffer));
+        }
+      }
+    } catch (e) {
+      console.error("[Proxy Recovery Error]", req.originalUrl, e);
+    }
+  }
+  next();
+});
 
 const upload = multer({ storage: multer.memoryStorage() });
 
@@ -61,6 +101,17 @@ app.put("/api/macros/:id", async (req, res) => {
 app.delete("/api/macros/:id", async (req, res) => {
   await db.deleteMacro(req.params.id);
   res.json({ success: true });
+});
+
+// Files
+app.get("/api/files", async (req, res) => {
+  res.json(await db.getFiles());
+});
+
+app.post("/api/files", async (req, res) => {
+  const file = { ...req.body, id: uuidv4(), createdAt: new Date().toISOString() };
+  await db.addFile(file);
+  res.json(file);
 });
 
 // Certificates
@@ -154,7 +205,9 @@ let activeExecution: {
     status: 'running' | 'paused' | 'completed' | 'error',
     currentStepIndex: number,
     screenshot?: string,
-    logs: string[]
+    currentUrl?: string,
+    logs: string[],
+    _resumeState?: any
 } | null = null;
 
 app.post("/api/execute/:macroId", async (req, res) => {
@@ -171,10 +224,11 @@ app.post("/api/execute/:macroId", async (req, res) => {
       macroId,
       status: 'running',
       currentStepIndex: 0,
+      currentUrl: 'about:blank',
       logs: [`Started macro ${macro.name}`, `Empresas selecionadas (${targetCompanies.length}): ${companyNames}`]
   };
 
-  simulateExecution(macro);
+  simulateExecution(macro, targetCompanies, 0, 0);
 
   res.json({ success: true, execution: activeExecution });
 });
@@ -187,10 +241,15 @@ app.post("/api/execution/resolve-captcha", async (req, res) => {
   if (activeExecution && activeExecution.status === 'paused') {
     activeExecution.logs.push(`Captcha resolved with: ${req.body.text}`);
     activeExecution.status = 'running';
-    activeExecution.currentStepIndex++;
-    const macro = await db.getMacro(activeExecution.macroId);
-    if (macro) {
-        simulateExecution(macro, activeExecution.currentStepIndex);
+    
+    if (activeExecution._resumeState) {
+        const { macro, targetCompanies, companyIndex, nextStepIndex } = activeExecution._resumeState;
+        simulateExecution(macro, targetCompanies, companyIndex, nextStepIndex + 1);
+    } else {
+        const macro = await db.getMacro(activeExecution.macroId);
+        if (macro) {
+            simulateExecution(macro, [], 0, activeExecution.currentStepIndex + 1);
+        }
     }
     res.json({ success: true });
   } else {
@@ -198,30 +257,61 @@ app.post("/api/execution/resolve-captcha", async (req, res) => {
   }
 });
 
-function simulateExecution(macro: any, startIndex = 0) {
+function simulateExecution(macro: any, targetCompanies: any[], companyIndex = 0, startIndex = 0) {
+    if (targetCompanies.length > 0 && companyIndex >= targetCompanies.length) {
+        if (activeExecution) {
+            activeExecution.status = 'completed';
+            activeExecution.logs.push("✅ Fim da execução para todas as empresas.");
+        }
+        return;
+    }
+
+    const currentCompany = targetCompanies.length > 0 ? targetCompanies[companyIndex] : null;
+    if (startIndex === 0 && activeExecution && currentCompany) {
+        activeExecution.logs.push(`\n▶️ Iniciando para: ${currentCompany.razaoSocial} (${currentCompany.cnpj})`);
+    }
+
     let i = startIndex;
     
     function next() {
         if (!activeExecution) return;
         if (i >= macro.steps.length) {
-            activeExecution.status = 'completed';
-            activeExecution.logs.push("Execution completed successfully.");
+            activeExecution.logs.push(`✓ Macro finalizada para a empresa atual.`);
+            simulateExecution(macro, targetCompanies, companyIndex + 1, 0);
             return;
         }
 
         const step = macro.steps[i];
         activeExecution.currentStepIndex = i;
-        activeExecution.logs.push(`Executing step ${i+1}: ${step.type} - ${step.selector || step.value || ''}`);
+
+        let evaluatedValue = step.value;
+        if (evaluatedValue && currentCompany) {
+            evaluatedValue = evaluatedValue
+                .replace(/\{\{CNPJ\}\}/g, currentCompany.cnpj || '')
+                .replace(/\{\{RAZAO_SOCIAL\}\}/g, currentCompany.razaoSocial || '')
+                .replace(/\{\{FANTASIA\}\}/g, currentCompany.nomeFantasia || '')
+                .replace(/\{\{EMAIL\}\}/g, currentCompany.email || '')
+                .replace(/\{\{TELEFONE\}\}/g, currentCompany.telefone || '')
+                .replace(/\{\{IE\}\}/g, currentCompany.inscricaoEstadual || '')
+                .replace(/\{\{IM\}\}/g, currentCompany.inscricaoMunicipal || '');
+        }
+
+        activeExecution.logs.push(`Executing step ${i+1}: ${step.type} - ${step.selector || ''} ${evaluatedValue ? `(Value: ${evaluatedValue})` : ''}`);
+
+        if (step.type === 'navigate' && evaluatedValue) {
+           activeExecution.currentUrl = evaluatedValue;
+        }
 
         if (step.type === 'captcha_wait') {
             activeExecution.status = 'paused';
             activeExecution.logs.push("Paused. Waiting for manual captcha resolution.");
             // We would set a screenshot here for real.
             activeExecution.screenshot = "https://via.placeholder.com/600x200?text=Simulated+Captcha+Screenshot";
+            activeExecution._resumeState = { macro, targetCompanies, companyIndex, nextStepIndex: i };
             return; // Wait for user to call resolve-captcha
         }
 
-        let waitTimeMs = 1000;
+        let waitTimeMs = 1500;
         if (step.type === 'wait' && step.waitTime) waitTimeMs = step.waitTime * 1000;
 
         i++;
@@ -233,16 +323,137 @@ function simulateExecution(macro: any, startIndex = 0) {
 
 
 // --- PROXY ROUTE FOR RECORDING SIMULATOR ---
-app.get("/api/proxy", async (req, res) => {
+// 1. Raw Passthrough
+app.all("/api/proxy/raw/*", async (req, res) => {
+    let targetUrl = req.originalUrl.replace("/api/proxy/raw/", "");
+    if (!targetUrl.startsWith("http")) return res.status(400).send("Invalid URL");
+    
+    try {
+        console.log(`[Proxy Fetch] ${req.method} ${targetUrl}`);
+        const response = await fetch(targetUrl, {
+          method: req.method,
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
+          } // omit accept headers to avoid issues
+        });
+        
+        res.setHeader("Access-Control-Allow-Origin", "*");
+        response.headers.forEach((value, key) => {
+            const lowerKey = key.toLowerCase();
+            if (lowerKey === 'set-cookie') {
+                // Ensure cookies work in iframe via SameSite=None
+                const cookies = response.headers.getSetCookie();
+                cookies.forEach(cookie => {
+                    let newCookie = cookie.replace(/SameSite=Strict/gi, 'SameSite=None')
+                                           .replace(/SameSite=Lax/gi, 'SameSite=None');
+                    if (!newCookie.toLowerCase().includes('samesite=none')) {
+                        newCookie += '; SameSite=None; Secure';
+                    }
+                    res.append('Set-Cookie', newCookie);
+                    console.log(`[Proxy Cookie] ${newCookie.split('=')[0]} preserved`);
+                });
+            } else if (['content-type', 'content-length', 'cache-control', 'location'].includes(lowerKey)) {
+                res.setHeader(key, value);
+            }
+        });
+
+        // Do not set Content-Security-Policy or X-Frame-Options to allow iframe usage
+
+        const contentType = response.headers.get("content-type") || "";
+        
+        if (contentType.includes("text/css")) {
+            let css = await response.text();
+            // Rewrite url(...) in CSS
+            css = css.replace(/url\((['"]?)([^'"\)]+)(['"]?)\)/gi, (match, q1, url, q2) => {
+                if (url.startsWith("data:")) return match;
+                if (url.startsWith("http://") || url.startsWith("https://")) {
+                    return `url(${q1}/api/proxy/raw/${url}${q2})`;
+                }
+                const absoluteUrl = new URL(url, targetUrl).href;
+                return `url(${q1}/api/proxy/raw/${absoluteUrl}${q2})`;
+            });
+            // Also rewrite @import "..."
+            css = css.replace(/@import\s+(['"])([^'"]+)(['"])/gi, (match, q1, url, q2) => {
+                 if (url.startsWith("http://") || url.startsWith("https://")) {
+                    return `@import ${q1}/api/proxy/raw/${url}${q2}`;
+                }
+                const absoluteUrl = new URL(url, targetUrl).href;
+                return `@import ${q1}/api/proxy/raw/${absoluteUrl}${q2}`;
+            });
+            res.setHeader("Content-Length", Buffer.byteLength(css));
+            return res.send(css);
+        } else if (contentType.includes("javascript") || contentType.includes("ecmascript") || targetUrl.includes(".js")) {
+             let js = await response.text();
+             res.setHeader("Content-Length", Buffer.byteLength(js));
+             res.setHeader("Content-Type", "application/javascript");
+             return res.send(js);
+        } else if (contentType.includes("image/svg+xml")) {
+             let svg = await response.text();
+             // Some naive SVG relative rewrites if needed
+             svg = svg.replace(/(href|src)=["']([^"']+)["']/gi, (match, attr, url) => {
+                 if (url.startsWith("data:") || url.startsWith("#")) return match;
+                 if (url.startsWith("http")) return `${attr}="/api/proxy/raw/${url}"`;
+                 const absoluteUrl = new URL(url, targetUrl).href;
+                 return `${attr}="/api/proxy/raw/${absoluteUrl}"`;
+             });
+             res.setHeader("Content-Length", Buffer.byteLength(svg));
+             return res.send(svg);
+        }
+        
+        const buffer = await response.arrayBuffer();
+        res.send(Buffer.from(buffer));
+    } catch (e: any) {
+        res.status(500).send(`Failed to proxy: ${e.message}`);
+    }
+});
+
+// 2. HTML Injector
+app.all("/api/proxy", async (req, res) => {
   const targetUrl = req.query.url as string;
   if (!targetUrl) return res.status(400).send("No URL");
+
+  // Removed Fallback Mode 3
+
+
   try {
-    const response = await fetch(targetUrl, {
+    const fetchOptions: RequestInit = {
+      method: req.method,
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
         'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
-      }
+        ...(req.method === 'POST' && { 'Content-Type': 'application/x-www-form-urlencoded' }),
+      },
+      ...(req.method === 'POST' && req.body && { body: new URLSearchParams(req.body as Record<string, string>).toString() }),
+      redirect: 'follow',
+    };
+
+    const response = await fetch(targetUrl, fetchOptions);
+
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    
+    // Cookie rewrite
+    const cookies = response.headers.getSetCookie();
+    cookies.forEach(cookie => {
+        let newCookie = cookie.replace(/SameSite=Strict/gi, 'SameSite=None')
+                               .replace(/SameSite=Lax/gi, 'SameSite=None');
+        if (!newCookie.toLowerCase().includes('samesite=none')) {
+            newCookie += '; SameSite=None; Secure';
+        }
+        res.append('Set-Cookie', newCookie);
+    });
+
+    response.headers.forEach((value, key) => {
+        const lowerKey = key.toLowerCase();
+        if (['location'].includes(lowerKey)) {
+            // Rewrite location redirects
+             if (value.startsWith("http")) {
+                 res.setHeader(key, `/api/proxy?url=${encodeURIComponent(value)}`);
+             } else {
+                 const absoluteUrl = new URL(value, targetUrl).href;
+                 res.setHeader(key, `/api/proxy?url=${encodeURIComponent(absoluteUrl)}`);
+             }
+        }
     });
 
     const contentType = response.headers.get("content-type") || "";
@@ -254,39 +465,209 @@ app.get("/api/proxy", async (req, res) => {
 
     let html = await response.text();
     
-    // Fix relative paths for src/href to make CSS/JS work when proxied
-    const originUrl = new URL('/', targetUrl).origin;
-    html = html.replace(/(src|href)="\/([^"]*)"/gi, `$1="${originUrl}/$2"`);
-    html = html.replace(/(src|href)='\/([^']*)'/gi, `$1='${originUrl}/$2'`);
+    // Replace absolute paths (/something) in HTML to force them into the proxy prefix.
+    try {
+      const origin = new URL(targetUrl).origin;
+      html = html.replace(/(src|href|action|data-src|data-href)="(\/[^"]*)"/gi, `$1="/api/proxy/raw/${origin}$2"`);
+      html = html.replace(/(src|href|action|data-src|data-href)='(\/[^']*)'/gi, `$1='/api/proxy/raw/${origin}$2'`);
+      
+      // Rewrite srcset
+      html = html.replace(/srcset="([^"]+)"/gi, (match, val) => {
+         const parts = val.split(',').map((p: string) => {
+             const [url, size] = p.trim().split(/\s+/);
+             if (!url) return '';
+             if (url.startsWith('http://') || url.startsWith('https://')) {
+                 return `/api/proxy/raw/${url} ${size || ''}`.trim();
+             } else if (url.startsWith('/')) {
+                 return `/api/proxy/raw/${origin}${url} ${size || ''}`.trim();
+             }
+             return `${url} ${size || ''}`.trim();
+         });
+         return `srcset="${parts.join(', ')}"`;
+      });
+    } catch (e) {
+      // Ignored
+    }
+
+    // Rewrite absolute HTTP/HTTPS links so they use our proxy
+    html = html.replace(/(src|href|action|data-src|data-href)="([^"]*)"/gi, (match, attr, val) => {
+      if (val.startsWith("http://") || val.startsWith("https://")) {
+        return `${attr}="/api/proxy?url=${encodeURIComponent(val)}"`;
+      }
+      return match;
+    });
+    html = html.replace(/(src|href|action|data-src|data-href)='([^']*)'/gi, (match, attr, val) => {
+      if (val.startsWith("http://") || val.startsWith("https://")) {
+        return `${attr}='/api/proxy?url=${encodeURIComponent(val)}'`;
+      }
+      return match;
+    });
 
     // Inject click interception script
     const script = `
     <script>
-      document.addEventListener('click', function(e) {
-        var target = e.target;
-        var selector = target.tagName.toLowerCase();
-        if (target.id) {
-          selector += '#' + target.id;
-        } else if (target.className && typeof target.className === 'string') {
-          selector += '.' + target.className.split(' ').join('.');
-        }
-        window.parent.postMessage({ type: 'recorder_click', selector: selector }, '*');
+      (function() {
+        if (window.__proxyPatched) return;
+        window.__proxyPatched = true;
 
-        var a = target.closest('a');
-        if (a && a.href && !a.href.startsWith('javascript:')) {
-            e.preventDefault();
-            e.stopPropagation();
-            window.parent.postMessage({ type: 'recorder_navigate', url: a.href }, '*');
-        }
-      }, true);
+        // Intercept dynamic script/link injections to proxy them
+        const originalAppendChild = Element.prototype.appendChild;
+        Element.prototype.appendChild = function(child) {
+           if (child && child.tagName) {
+               if (child.tagName === 'SCRIPT' && child.src && (child.src.startsWith('http://') || child.src.startsWith('https://'))) {
+                  const url = new URL(child.src, window.location.href);
+                  if (url.origin !== window.location.origin) {
+                      child.src = '/api/proxy/raw/' + child.src;
+                  }
+               }
+               if (child.tagName === 'LINK' && child.href && (child.href.startsWith('http://') || child.href.startsWith('https://'))) {
+                  const url = new URL(child.href, window.location.href);
+                  if (url.origin !== window.location.origin) {
+                      child.href = '/api/proxy/raw/' + child.href;
+                  }
+               }
+           }
+           return originalAppendChild.call(this, child);
+        };
 
-      document.addEventListener('submit', function(e) {
-         e.preventDefault();
-         const action = e.target.action || window.location.href;
-         window.parent.postMessage({ type: 'recorder_navigate', url: action }, '*');
-      }, true);
+        const originalInsertBefore = Element.prototype.insertBefore;
+        Element.prototype.insertBefore = function(child, ref) {
+           if (child && child.tagName) {
+               if (child.tagName === 'SCRIPT' && child.src && (child.src.startsWith('http://') || child.src.startsWith('https://'))) {
+                  const url = new URL(child.src, window.location.href);
+                  if (url.origin !== window.location.origin) {
+                      child.src = '/api/proxy/raw/' + child.src;
+                  }
+               }
+               if (child.tagName === 'LINK' && child.href && (child.href.startsWith('http://') || child.href.startsWith('https://'))) {
+                  const url = new URL(child.href, window.location.href);
+                  if (url.origin !== window.location.origin) {
+                      child.href = '/api/proxy/raw/' + child.href;
+                  }
+               }
+           }
+           return originalInsertBefore.call(this, child, ref);
+        };
+
+        const originalFetch = window.fetch;
+        window.fetch = async function(...args) {
+            if (typeof args[0] === 'string') {
+                if (args[0].startsWith('http://') || args[0].startsWith('https://')) {
+                    const url = new URL(args[0]);
+                    if (url.origin !== window.location.origin) {
+                        args[0] = '/api/proxy/raw/' + args[0];
+                    }
+                } else if (args[0].startsWith('/')) {
+                    // It's already relative to the proxy base due to <base> tag, 
+                    // but some JS ignores <base> for fetch. Let's fix.
+                    args[0] = window.document.baseURI ? new URL(args[0], window.document.baseURI).href : args[0];
+                }
+            } else if (args[0] instanceof Request) {
+                 const req = args[0];
+                 if (req.url.startsWith('http://') || req.url.startsWith('https://')) {
+                     const url = new URL(req.url);
+                     if (url.origin !== window.location.origin) {
+                         args[0] = new Request('/api/proxy/raw/' + req.url, req);
+                     }
+                 }
+            }
+            return originalFetch.apply(this, args);
+        };
+
+        const originalXHR = window.XMLHttpRequest.prototype.open;
+        window.XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+            if (typeof url === 'string') {
+                if (url.startsWith('http://') || url.startsWith('https://')) {
+                    const u = new URL(url);
+                    if (u.origin !== window.location.origin) {
+                        url = '/api/proxy/raw/' + url;
+                    }
+                } else if (url.startsWith('/')) {
+                    url = window.document.baseURI ? new URL(url, window.document.baseURI).href : url;
+                }
+            }
+            return originalXHR.call(this, method, url, ...rest);
+        };
+
+        const originalWorker = window.Worker;
+        window.Worker = function(url, options) {
+            if (typeof url === 'string' && (url.startsWith('http://') || url.startsWith('https://'))) {
+                url = '/api/proxy/raw/' + url;
+            }
+            return new originalWorker(url, options);
+        };
+
+        const originalWebSocket = window.WebSocket;
+        window.WebSocket = function(url, protocols) {
+            if (typeof url === 'string') {
+                 if (url.startsWith('ws://') || url.startsWith('wss://')) {
+                     // Can't proxy WS directly through the same route without upgrade handling
+                     // but we could try to rewrite if we had a WS proxy. 
+                     // For now just leave it as is or rewrite to a wss proxy endpoint.
+                 }
+            }
+            return protocols ? new originalWebSocket(url, protocols) : new originalWebSocket(url);
+        };
+
+        const originalEventSource = window.EventSource;
+        window.EventSource = function(url, options) {
+             if (typeof url === 'string' && (url.startsWith('http://') || url.startsWith('https://'))) {
+                 url = '/api/proxy/raw/' + url;
+             }
+             return options ? new originalEventSource(url, options) : new originalEventSource(url);
+        };
+
+        document.addEventListener('submit', function(e) {
+           e.preventDefault();
+           const form = e.target;
+           const action = form.action.startsWith('http') 
+             ? form.action 
+             : new URL(form.action, document.baseURI).href;
+           const method = (form.method || 'GET').toUpperCase();
+           
+           const formData = new FormData(form);
+           const body = new URLSearchParams(formData).toString();
+           
+           window.parent.postMessage({ 
+             type: 'recorder_navigate', 
+             url: action,
+             method: method,
+             body: body
+           }, '*');
+        }, true);
+
+        document.addEventListener('click', function(e) {
+          var target = e.target;
+          
+          function getSelector(el) {
+            if (el.id) return '#' + el.id;
+            var safeClasses = Array.from(el.classList || [])
+              .filter(function(c) { return /^[a-zA-Z_-][a-zA-Z0-9_-]*$/.test(c); })
+              .slice(0, 2);
+            var base = el.tagName.toLowerCase();
+            if (safeClasses.length) base += '.' + safeClasses.join('.');
+            var siblings = el.parentElement 
+              ? Array.from(el.parentElement.children).filter(function(s) { return s.tagName === el.tagName; })
+              : [];
+            if (siblings.length > 1) base += ':nth-of-type(' + (siblings.indexOf(el) + 1) + ')';
+            return base;
+          }
+          
+          var selector = getSelector(target);
+          var isInput = target.tagName.toLowerCase() === 'input' || target.tagName.toLowerCase() === 'textarea' || target.tagName.toLowerCase() === 'select';
+          window.parent.postMessage({ type: isInput ? 'recorder_type' : 'recorder_click', selector: selector, tagName: target.tagName.toLowerCase() }, '*');
+
+          var a = target.closest('a');
+          if (a && a.href && !a.href.startsWith('javascript:') && !a.href.startsWith('#')) {
+              e.preventDefault();
+              e.stopPropagation();
+              const url = a.href.startsWith('http') ? a.href : new URL(a.href, document.baseURI).href;
+              window.parent.postMessage({ type: 'recorder_navigate', url: url }, '*');
+          }
+        }, true);
+      })();
     </script>
-    <base href="${targetUrl}">
+    <base href="/api/proxy/raw/${targetUrl}">
     `;
     
     if (html.toLowerCase().includes('<head>')) {

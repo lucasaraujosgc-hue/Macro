@@ -10,6 +10,7 @@ import Companies from "./pages/Companies";
 import Certificates from "./pages/Certificates";
 import Macros from "./pages/Macros";
 import Execution from "./pages/Execution";
+import Gallery from "./pages/Gallery";
 
 export default function App() {
   return (
@@ -21,6 +22,7 @@ export default function App() {
           <Route path="certificates" element={<Certificates />} />
           <Route path="macros" element={<Macros />} />
           <Route path="execution" element={<Execution />} />
+          <Route path="gallery" element={<Gallery />} />
         </Route>
       </Routes>
     </HashRouter>
