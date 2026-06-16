@@ -380,7 +380,8 @@ app.all("/api/proxy", async (req, res) => {
   if (!targetUrl) return res.status(400).send("No URL");
 
   // Fallback Mode 3 - Automatic Playwright detection for complex sites
-  if (targetUrl.includes("gov.br") || targetUrl.includes("receita.fazenda") || targetUrl.includes("cav.receita") || targetUrl.includes("sefaz")) {
+  const isTopLevel = req.query.topLevel === 'true';
+  if (isTopLevel && (targetUrl.includes("gov.br") || targetUrl.includes("receita.fazenda") || targetUrl.includes("cav.receita") || targetUrl.includes("sefaz"))) {
       return res.send(`
          <html>
          <body>

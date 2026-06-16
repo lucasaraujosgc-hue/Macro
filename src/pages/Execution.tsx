@@ -92,7 +92,7 @@ export default function Execution() {
                    // we show the proxy iframe or a mocked scanner overlay on top of the iframe.
                    <div className="w-full h-full relative">
                        <iframe 
-                           src={`/api/proxy?url=${encodeURIComponent(execution.currentUrl)}`} 
+                           src={`/api/proxy?url=${encodeURIComponent(execution.currentUrl)}&topLevel=true`} 
                            className="w-full h-full border-none opacity-50 grayscale select-none pointer-events-none"
                            title="Browser Simulador"
                        />

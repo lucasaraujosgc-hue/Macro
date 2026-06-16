@@ -40,6 +40,7 @@ export default function Macros() {
       } else if (event.data.type === 'recorder_navigate') {
         const url = event.data.url;
         if (!url.startsWith('http')) return;
+        setPlaywrightMode(false);
         setProxyUrlInput(url);
         addStep('navigate', { value: url });
         
@@ -232,6 +233,7 @@ export default function Macros() {
                   onChange={e => setProxyUrlInput(e.target.value)} 
                   onKeyDown={e => {
                     if (e.key === 'Enter') {
+                       setPlaywrightMode(false);
                        setActiveProxyUrl(proxyUrlInput);
                        addStep('navigate', { value: proxyUrlInput });
                     }
@@ -241,6 +243,7 @@ export default function Macros() {
                 />
                 <button 
                   onClick={() => {
+                    setPlaywrightMode(false);
                     setActiveProxyUrl(proxyUrlInput);
                     addStep('navigate', { value: proxyUrlInput });
                   }}
@@ -339,7 +342,7 @@ export default function Macros() {
                       <form
                         id="proxy-post-form"
                         method="POST"
-                        action={`/api/proxy?url=${encodeURIComponent(proxyPostData.url)}`}
+                        action={`/api/proxy?url=${encodeURIComponent(proxyPostData.url)}&topLevel=true`}
                         target="proxy-iframe"
                         style={{ display: 'none' }}
                       >
@@ -358,7 +361,7 @@ export default function Macros() {
                     ) : (
                       <iframe 
                         name="proxy-iframe"
-                        src={activeProxyUrl ? `/api/proxy?url=${encodeURIComponent(activeProxyUrl)}` : undefined} 
+                        src={activeProxyUrl ? `/api/proxy?url=${encodeURIComponent(activeProxyUrl)}&topLevel=true` : undefined} 
                         ref={iframeRef}
                         className="w-full h-full border-none relative z-0 bg-white"
                         sandbox="allow-scripts allow-same-origin allow-forms allow-top-navigation-by-user-activation"
