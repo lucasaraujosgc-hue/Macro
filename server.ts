@@ -8,6 +8,9 @@ import { db, initDB } from "./server/db";
 import multer from "multer";
 import { v4 as uuidv4 } from "uuid";
 import forge from "node-forge";
+import { CookieJar } from "tough-cookie";
+import { fileURLToPath } from "url";
+import fs from "fs";
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -39,7 +42,85 @@ const stealthHeaders: Record<string, string> = {
   "Upgrade-Insecure-Requests": "1",
 };
 
-// --- ASSET PROXY MIDDLEWARE ---
+// ─── Per-execution cookie jar (persists session across proxy requests) ──────────
+// Keyed by executionId so multiple concurrent sessions don't share cookies.
+// For single-user use, we keep one global "recording" jar for the simulator.
+const sessionJars: Map<string, CookieJar> = new Map();
+const RECORDING_SESSION = "recording";
+
+function getJar(sessionId: string): CookieJar {
+  if (!sessionJars.has(sessionId)) sessionJars.set(sessionId, new CookieJar());
+  return sessionJars.get(sessionId)!;
+}
+
+async function cookiesToHeader(jar: CookieJar, url: string): Promise<string> {
+  try { return await jar.getCookieString(url); } catch { return ""; }
+}
+
+async function storeCookies(jar: CookieJar, response: Response, targetUrl: string) {
+  const setCookieHeaders = response.headers.getSetCookie?.() ?? [];
+  for (const cookie of setCookieHeaders) {
+    try { await jar.setCookie(cookie, targetUrl); } catch { /* ignore invalid */ }
+  }
+}
+
+// ─── In-memory capture store for real PDFs downloaded through the proxy ────────
+interface CapturedFile {
+  id: string;
+  filename: string;
+  mimeType: string;
+  data: Buffer;         // raw bytes — served via /api/captured/:id
+  capturedAt: string;
+  sessionId: string;
+  companyId?: string;
+  macroId?: string;
+}
+const capturedFiles: Map<string, CapturedFile> = new Map();
+
+// Serve captured file bytes to the browser for real download / gallery save
+app.get("/api/captured/:id", (req, res) => {
+  const cf = capturedFiles.get(req.params.id);
+  if (!cf) return res.status(404).json({ error: "Arquivo não encontrado" });
+  res.setHeader("Content-Type", cf.mimeType);
+  res.setHeader("Content-Disposition", `attachment; filename="${cf.filename}"`);
+  res.setHeader("Content-Length", cf.data.byteLength);
+  res.send(cf.data);
+});
+
+// Accept base64 blob PDF from client-side interception
+app.post("/api/captured-blob", async (req, res) => {
+  try {
+    const { dataUrl, mimeType = "application/pdf", filename = "download.pdf" } = req.body;
+    if (!dataUrl || !dataUrl.startsWith("data:")) {
+      return res.status(400).json({ error: "Invalid dataUrl" });
+    }
+    const base64 = dataUrl.split(",")[1];
+    const data = Buffer.from(base64, "base64");
+
+    const captured: CapturedFile = {
+      id: uuidv4(),
+      filename,
+      mimeType,
+      data,
+      capturedAt: new Date().toISOString(),
+      sessionId: RECORDING_SESSION,
+    };
+    capturedFiles.set(captured.id, captured);
+    console.log(`[Blob Capture] ${filename} (${data.byteLength} bytes)`);
+    res.json({ id: captured.id, filename, size: data.byteLength, url: `/api/captured/${captured.id}` });
+  } catch (e) { sendError(res, e); }
+});
+
+// List captured files for a session
+app.get("/api/captured", (req, res) => {
+  const sessionId = (req.query.session as string) || RECORDING_SESSION;
+  const files = [...capturedFiles.values()]
+    .filter(f => f.sessionId === sessionId)
+    .map(({ data: _data, ...meta }) => meta); // strip binary from list
+  res.json(files);
+});
+
+// ─── ASSET PROXY MIDDLEWARE ────────────────────────────────────────────────────
 // Catches assets that escaped the proxy prefix (e.g. absolute paths like /fonts/font.woff loaded from CSS)
 app.use(async (req, res, next) => {
   if (
@@ -333,6 +414,36 @@ app.get("/api/execution", (_req, res) => {
   res.json(activeExecution);
 });
 
+// Called by the frontend when proxy_download_captured fires during an execution
+app.post("/api/execution/capture-file", async (req, res) => {
+  const { capturedId } = req.body;
+  const cf = capturedFiles.get(capturedId);
+  if (!cf) return res.status(404).json({ error: "Captured file not found" });
+
+  if (activeExecution) {
+    const currentCompanies = activeExecution._resumeState?.targetCompanies;
+    const companyIndex = activeExecution._resumeState?.companyIndex;
+    const company = currentCompanies?.[companyIndex ?? 0];
+    cf.companyId = company?.id;
+    cf.macroId = activeExecution.macroId;
+
+    // Persist to DB gallery
+    await db.addFile({
+      id: cf.id,
+      filename: cf.filename,
+      size: cf.data.byteLength,
+      createdAt: cf.capturedAt,
+      companyId: cf.companyId,
+      macroId: cf.macroId,
+      downloadUrl: `/api/captured/${cf.id}`,
+    }).catch((e: Error) => console.error("[File Save Error]", e));
+
+    activeExecution.logs.push(`📥 PDF capturado: ${cf.filename} (${Math.round(cf.data.byteLength / 1024)} KB)`);
+  }
+
+  res.json({ success: true, filename: cf.filename });
+});
+
 app.post("/api/execution/cancel", (_req, res) => {
   if (!activeExecution) return res.status(400).json({ error: "Nenhuma execução ativa" });
   activeExecution.status = "cancelled";
@@ -419,19 +530,12 @@ function simulateExecution(
     if (i >= macro.steps.length) {
       activeExecution.logs.push(`✓ Macro finalizada para a empresa atual.`);
 
+      // Files are captured in real-time by the proxy PDF intercept route.
+      // When a download is detected, the frontend calls /api/execution/capture-file
+      // to associate it with the current execution. Nothing fake is created here.
       if (currentCompany) {
-        const cnpjClean = currentCompany.cnpj ? currentCompany.cnpj.replace(/\D/g, "") : Math.random().toString().slice(2, 8);
-        const fakeFile = {
-          id: uuidv4(),
-          filename: `comprovante_${cnpjClean}_${Date.now()}.pdf`,
-          size: Math.floor(Math.random() * 500000) + 50000,
-          createdAt: new Date().toISOString(),
-          companyId: currentCompany.id,
-          macroId: macro.id,
-        };
-        db.addFile(fakeFile).catch((e: Error) => console.error("[File Save Error]", e));
         activeExecution.logs.push(
-          `📥 Download Concluído: ${fakeFile.filename} salvo na galeria.`,
+          `✓ Sequência concluída para ${currentCompany.razaoSocial}. Aguardando captura de arquivos pelo proxy...`,
         );
       }
 
@@ -457,6 +561,13 @@ function simulateExecution(
 
     if (step.type === "navigate" && evaluatedValue) {
       activeExecution.currentUrl = evaluatedValue;
+    }
+
+    // postback: treated like a click for timing purposes — iframe handles it
+    if (step.type === "postback") {
+      activeExecution.logs.push(
+        `  ↳ __doPostBack('${step.selector || ""}', '${evaluatedValue || ""}')`,
+      );
     }
 
     if (step.type === "captcha_wait") {
@@ -501,40 +612,107 @@ function rewriteCookies(response: Response, res: express.Response) {
   });
 }
 
-// 1. Raw Passthrough
+// 1. Raw Passthrough — session-aware, PDF/download capture
 app.all("/api/proxy/raw/*", async (req, res) => {
   let targetUrl = req.originalUrl.replace("/api/proxy/raw/", "");
   if (!targetUrl.startsWith("http")) return res.status(400).send("Invalid URL");
 
+  const sessionId = (req.headers["x-proxy-session"] as string) || RECORDING_SESSION;
+  const jar = getJar(sessionId);
+
   try {
     console.log(`[Proxy Raw] ${req.method} ${targetUrl}`);
 
-    // Forward request body for POST/PUT/PATCH
     const hasBody = ["POST", "PUT", "PATCH"].includes(req.method);
+    const cookieStr = await cookiesToHeader(jar, targetUrl);
+
     const fetchOptions: RequestInit = {
       method: req.method,
-      headers: { ...stealthHeaders },
+      headers: {
+        ...stealthHeaders,
+        ...(cookieStr && { Cookie: cookieStr }),
+        ...(hasBody && { "Content-Type": req.headers["content-type"] || "application/x-www-form-urlencoded" }),
+      },
       ...(hasBody && req.body && {
         body: typeof req.body === "string"
           ? req.body
-          : JSON.stringify(req.body),
+          : new URLSearchParams(req.body as Record<string, string>).toString(),
       }),
+      redirect: "follow",
     };
 
     const response = await fetch(targetUrl, fetchOptions);
+    await storeCookies(jar, response, targetUrl);
 
     res.setHeader("Access-Control-Allow-Origin", "*");
     rewriteCookies(response, res);
 
+    const contentType = response.headers.get("content-type") || "";
+    const contentDisposition = response.headers.get("content-disposition") || "";
+
+    // ── PDF / binary download interception ────────────────────────────────────
+    // Detect: explicit attachment OR pdf content type OR octet-stream
+    const isDownload =
+      contentDisposition.toLowerCase().includes("attachment") ||
+      contentType.includes("application/pdf") ||
+      contentType.includes("application/octet-stream");
+
+    if (isDownload) {
+      const buffer = await response.arrayBuffer();
+      const data = Buffer.from(buffer);
+
+      // Extract filename from Content-Disposition or URL
+      let filename = "arquivo";
+      const fnMatch = contentDisposition.match(/filename[^;=\n]*=(['"]?)([^\1;\n]*)\1/i);
+      if (fnMatch?.[2]) {
+        filename = decodeURIComponent(fnMatch[2].replace(/['"]/g, "").trim());
+      } else {
+        try {
+          const urlPath = new URL(targetUrl).pathname;
+          filename = urlPath.split("/").pop() || "arquivo";
+        } catch { /* use default */ }
+      }
+
+      // Ensure .pdf extension if content is PDF
+      if (contentType.includes("application/pdf") && !filename.toLowerCase().endsWith(".pdf")) {
+        filename += ".pdf";
+      }
+
+      const captured: CapturedFile = {
+        id: uuidv4(),
+        filename,
+        mimeType: contentType || "application/octet-stream",
+        data,
+        capturedAt: new Date().toISOString(),
+        sessionId,
+      };
+      capturedFiles.set(captured.id, captured);
+
+      console.log(`[Proxy] Captured download: ${filename} (${data.byteLength} bytes)`);
+
+      // Notify parent frame about the captured file
+      // We return a small HTML page that postMessages the parent and then closes/redirects
+      return res.send(`<!DOCTYPE html><html><body><script>
+        window.parent.postMessage({
+          type: 'proxy_download_captured',
+          file: {
+            id: '${captured.id}',
+            filename: '${filename.replace(/'/g, "\'")}',
+            mimeType: '${contentType}',
+            size: ${data.byteLength},
+            url: '/api/captured/${captured.id}'
+          }
+        }, '*');
+      <\/script></body></html>`);
+    }
+
     response.headers.forEach((value, key) => {
       const lowerKey = key.toLowerCase();
-      if (lowerKey === "set-cookie") return; // Already handled above
+      if (lowerKey === "set-cookie") return;
       if (["content-type", "cache-control", "location"].includes(lowerKey)) {
         res.setHeader(key, value);
       }
     });
-
-    const contentType = response.headers.get("content-type") || "";
 
     if (contentType.includes("text/css")) {
       let css = await response.text();
@@ -559,7 +737,6 @@ app.all("/api/proxy/raw/*", async (req, res) => {
           return `@import ${q1}/api/proxy/raw/${absoluteUrl}${q2}`;
         },
       );
-      // Set Content-Length AFTER all transformations
       const buf = Buffer.from(css, "utf-8");
       res.setHeader("Content-Length", buf.byteLength);
       return res.send(buf);
@@ -598,18 +775,26 @@ app.all("/api/proxy/raw/*", async (req, res) => {
   }
 });
 
-// 2. HTML Injector
+// 2. HTML Injector — session-aware
 app.all("/api/proxy", async (req, res) => {
   const targetUrl = req.query.url as string;
   if (!targetUrl) return res.status(400).send("No URL provided");
 
+  const sessionId = (req.headers["x-proxy-session"] as string) || RECORDING_SESSION;
+  const jar = getJar(sessionId);
+
   try {
     const hasBody = req.method === "POST";
+    const cookieStr = await cookiesToHeader(jar, targetUrl);
+
     const fetchOptions: RequestInit = {
       method: req.method,
       headers: {
         ...stealthHeaders,
+        ...(cookieStr && { Cookie: cookieStr }),
         ...(hasBody && { "Content-Type": "application/x-www-form-urlencoded" }),
+        Referer: targetUrl,
+        Origin: new URL(targetUrl).origin,
       },
       ...(hasBody && req.body && {
         body: new URLSearchParams(req.body as Record<string, string>).toString(),
@@ -618,9 +803,50 @@ app.all("/api/proxy", async (req, res) => {
     };
 
     const response = await fetch(targetUrl, fetchOptions);
+    await storeCookies(jar, response, targetUrl);
 
     res.setHeader("Access-Control-Allow-Origin", "*");
     rewriteCookies(response, res);
+
+    // ── Direct download from the HTML proxy endpoint ────────────────────────
+    const contentDisposition = response.headers.get("content-disposition") || "";
+    const contentTypeCheck = response.headers.get("content-type") || "";
+    const isDirectDownload =
+      contentDisposition.toLowerCase().includes("attachment") ||
+      contentTypeCheck.includes("application/pdf");
+
+    if (isDirectDownload) {
+      const buffer = await response.arrayBuffer();
+      const data = Buffer.from(buffer);
+      let filename = "arquivo.pdf";
+      const fnMatch = contentDisposition.match(/filename[^;=
+]*=(['"]?)([^;
+]*)\1/i);
+      if (fnMatch?.[2]) filename = decodeURIComponent(fnMatch[2].replace(/['"]/g, "").trim());
+
+      const captured: CapturedFile = {
+        id: uuidv4(),
+        filename,
+        mimeType: contentTypeCheck || "application/pdf",
+        data,
+        capturedAt: new Date().toISOString(),
+        sessionId,
+      };
+      capturedFiles.set(captured.id, captured);
+      console.log(`[Proxy HTML] Captured download: ${filename} (${data.byteLength} bytes)`);
+      return res.send(`<!DOCTYPE html><html><body><script>
+        window.parent.postMessage({
+          type: 'proxy_download_captured',
+          file: {
+            id: '${captured.id}',
+            filename: '${filename.replace(/'/g, "\'")}',
+            mimeType: '${contentTypeCheck}',
+            size: ${data.byteLength},
+            url: '/api/captured/${captured.id}'
+          }
+        }, '*');
+      <\/script></body></html>`);
+    }
 
     response.headers.forEach((value, key) => {
       const lowerKey = key.toLowerCase();
@@ -803,16 +1029,39 @@ app.all("/api/proxy", async (req, res) => {
           return options ? new originalEventSource(url, options) : new originalEventSource(url);
         };
 
-        // Form submit intercept
+        // ── Intercept PDF blob URLs created by the page ─────────────────────────
+        // Some portals do: const blob = new Blob([pdfBytes], {type:'application/pdf'});
+        //                  const url = URL.createObjectURL(blob);
+        //                  <a href={url} download>.click()
+        const _origCreateObjectURL = URL.createObjectURL.bind(URL);
+        URL.createObjectURL = function(obj) {
+          const url = _origCreateObjectURL(obj);
+          try {
+            if (obj instanceof Blob && (obj.type.includes('pdf') || obj.type.includes('octet'))) {
+              const reader = new FileReader();
+              reader.onloadend = function() {
+                window.parent.postMessage({
+                  type: 'proxy_blob_download',
+                  mimeType: obj.type,
+                  dataUrl: reader.result
+                }, '*');
+              };
+              reader.readAsDataURL(obj);
+            }
+          } catch(e) {}
+          return url;
+        };
+
+        // ── Form submit intercept ─────────────────────────────────────────────
         document.addEventListener('submit', function(e) {
           e.preventDefault();
-          const form = e.target;
-          const action = form.action.startsWith('http')
+          var form = e.target;
+          var action = form.action.startsWith('http')
             ? form.action
             : new URL(form.action, document.baseURI).href;
-          const method = (form.method || 'GET').toUpperCase();
-          const formData = new FormData(form);
-          const body = new URLSearchParams(formData).toString();
+          var method = (form.method || 'GET').toUpperCase();
+          var formData = new FormData(form);
+          var body = new URLSearchParams(formData).toString();
           window.parent.postMessage({
             type: 'recorder_navigate',
             url: action,
@@ -821,38 +1070,93 @@ app.all("/api/proxy", async (req, res) => {
           }, '*');
         }, true);
 
-        // Unique selector generator
+        // ── Intercept window.open (portals often open PDFs in new tab) ────────
+        var _origWindowOpen = window.open;
+        window.open = function(url, target, features) {
+          if (url && typeof url === 'string') {
+            // Resolve relative URLs
+            try { url = new URL(url, document.baseURI).href; } catch(e) {}
+            if (url.startsWith('http')) {
+              // Check if it looks like a PDF
+              if (url.match(/\.pdf(\?|$)/i)) {
+                window.parent.postMessage({ type: 'recorder_navigate', url: url }, '*');
+                return null;
+              }
+              url = '/api/proxy?url=' + encodeURIComponent(url);
+            }
+          }
+          return _origWindowOpen.call(window, url, target, features);
+        };
+
+        // ── __doPostBack interception (ASP.NET WebForms) ──────────────────────
+        // Many gov portals use __doPostBack('ctl00$...', '') for print/download.
+        // We need to intercept it AFTER the page defines it, and also patch
+        // any re-definitions (some pages override __doPostBack multiple times).
+        function patchDoPostBack() {
+          if (!window.__doPostBack || window.__doPostBack.__patched) return;
+          var _orig = window.__doPostBack;
+          window.__doPostBack = function(eventTarget, eventArgument) {
+            // Record the action so the macro captures it
+            window.parent.postMessage({
+              type: 'recorder_postback',
+              eventTarget: eventTarget,
+              eventArgument: eventArgument || ''
+            }, '*');
+            // Still execute the real postback so the iframe navigates and returns the PDF
+            return _orig.call(this, eventTarget, eventArgument);
+          };
+          window.__doPostBack.__patched = true;
+        }
+
+        // Try immediately, then on DOMContentLoaded, then poll briefly
+        patchDoPostBack();
+        document.addEventListener('DOMContentLoaded', patchDoPostBack);
+        var _pbPoll = setInterval(function() {
+          patchDoPostBack();
+          if (window.__doPostBack && window.__doPostBack.__patched) clearInterval(_pbPoll);
+        }, 300);
+        setTimeout(function() { clearInterval(_pbPoll); }, 10000);
+
+        // ── Unique selector generator ─────────────────────────────────────────
         function getSelector(el) {
           if (el.id) return '#' + CSS.escape(el.id);
-          const safeClasses = Array.from(el.classList || [])
+          var safeClasses = Array.from(el.classList || [])
             .filter(function(c) { return /^[a-zA-Z_-][a-zA-Z0-9_-]*$/.test(c); })
             .slice(0, 2);
-          let base = el.tagName.toLowerCase();
+          var base = el.tagName.toLowerCase();
           if (safeClasses.length) base += '.' + safeClasses.join('.');
-          const siblings = el.parentElement
+          var siblings = el.parentElement
             ? Array.from(el.parentElement.children).filter(function(s) { return s.tagName === el.tagName; })
             : [];
           if (siblings.length > 1) base += ':nth-of-type(' + (siblings.indexOf(el) + 1) + ')';
           return base;
         }
 
-        // Click recorder
+        // ── Click recorder ────────────────────────────────────────────────────
         document.addEventListener('click', function(e) {
           var target = e.target;
           var selector = getSelector(target);
           var isInput = ['input', 'textarea', 'select'].includes(target.tagName.toLowerCase());
+
           window.parent.postMessage({
             type: isInput ? 'recorder_type' : 'recorder_click',
             selector: selector,
             tagName: target.tagName.toLowerCase()
           }, '*');
 
+          // Handle javascript: hrefs (doPostBack style) — record but let execute
           var a = target.closest('a');
-          if (a && a.href && !a.href.startsWith('javascript:') && !a.href.startsWith('#')) {
-            e.preventDefault();
-            e.stopPropagation();
-            const url = a.href.startsWith('http') ? a.href : new URL(a.href, document.baseURI).href;
-            window.parent.postMessage({ type: 'recorder_navigate', url: url }, '*');
+          if (a && a.href) {
+            if (a.href.toLowerCase().startsWith('javascript:')) {
+              // Let it execute naturally — __doPostBack intercept above will catch it
+              return;
+            }
+            if (!a.href.startsWith('#')) {
+              e.preventDefault();
+              e.stopPropagation();
+              var url = a.href.startsWith('http') ? a.href : new URL(a.href, document.baseURI).href;
+              window.parent.postMessage({ type: 'recorder_navigate', url: url }, '*');
+            }
           }
         }, true);
 

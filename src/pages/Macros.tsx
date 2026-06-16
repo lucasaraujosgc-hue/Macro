@@ -31,6 +31,7 @@ export default function Macros() {
   const [selectedRunMacroId, setSelectedRunMacroId] = useState<string | null>(null);
   const [selectedCompaniesForRun, setSelectedCompaniesForRun] = useState<string[]>([]);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
+  const [capturedFiles, setCapturedFiles] = useState<Array<{id:string;filename:string;size:number;url:string}>>([]);
 
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const proxyFormRef = useRef<HTMLFormElement>(null);
@@ -105,6 +106,35 @@ export default function Macros() {
         }
       } else if (evType === "recorder_cert_request") {
         debouncedAddStep("install_cert");
+      } else if (evType === "recorder_postback") {
+        // ASP.NET __doPostBack — record as a postback step
+        debouncedAddStep("postback", {
+          selector: event.data.eventTarget,
+          value: event.data.eventArgument,
+        });
+      } else if (evType === "proxy_download_captured") {
+        // Real file captured by proxy — save to gallery and notify execution
+        const file = event.data.file as { id: string; filename: string; mimeType: string; size: number; url: string };
+        setCapturedFiles(prev => [...prev, { ...file }]);
+        // Associate with running execution if any
+        fetch("/api/execution/capture-file", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ capturedId: file.id }),
+        }).catch(console.error);
+      } else if (evType === "proxy_blob_download") {
+        // Blob PDF created client-side (e.g. jsPDF)
+        const { dataUrl, mimeType } = event.data as { dataUrl: string; mimeType: string };
+        fetch("/api/captured-blob", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ dataUrl, mimeType, filename: `download_${Date.now()}.pdf` }),
+        })
+          .then(r => r.json())
+          .then(file => {
+            if (file.id) setCapturedFiles(prev => [...prev, file]);
+          })
+          .catch(console.error);
       } else if (evType === "recorder_requires_playwright") {
         setPlaywrightMode(true);
         setPlaywrightConnected(false);
@@ -458,6 +488,30 @@ export default function Macros() {
               Simulador Web (Gravação)
             </h3>
             <div className="backdrop-blur-md bg-white/5 p-4 rounded-xl border border-white/10 shadow-xl shadow-black/10 flex flex-col h-[600px]">
+              {/* Captured files panel */}
+              {capturedFiles.length > 0 && (
+                <div className="mb-3 space-y-1.5">
+                  <p className="text-[10px] uppercase tracking-wider text-green-400 font-semibold px-1">
+                    📥 Arquivos Capturados ({capturedFiles.length})
+                  </p>
+                  {capturedFiles.map(f => (
+                    <div key={f.id} className="flex items-center justify-between px-3 py-2 bg-green-500/10 border border-green-500/20 rounded-lg text-xs">
+                      <span className="text-green-300 font-mono truncate max-w-[200px]">{f.filename}</span>
+                      <div className="flex items-center gap-2 ml-2 shrink-0">
+                        <span className="text-slate-500">{Math.round(f.size / 1024)} KB</span>
+                        <a
+                          href={f.url}
+                          download={f.filename}
+                          className="px-2 py-0.5 bg-green-600 hover:bg-green-500 text-white rounded text-[10px] font-bold"
+                        >
+                          Baixar
+                        </a>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
               {/* URL bar — Enter and button share the same handler; no duplicate step */}
               <div className="flex space-x-2 mb-3">
                 <input
