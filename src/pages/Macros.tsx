@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState } from "react";
 import { Macro, MacroStep, MacroStepType, Company } from "@/types";
 import { Plus, Trash2, Edit2, Play, Save, ChevronRight, GripVertical } from "lucide-react";
 import { v4 as uuidv4 } from "uuid";
@@ -11,9 +11,6 @@ export default function Macros() {
   const [activeProxyUrl, setActiveProxyUrl] = useState("");
   const [selectedRunMacroId, setSelectedRunMacroId] = useState<string | null>(null);
   const [selectedCompaniesForRun, setSelectedCompaniesForRun] = useState<string[]>([]);
-  
-  const iframeRef = useRef<HTMLIFrameElement>(null);
-  const [proxyPostData, setProxyPostData] = useState<{url: string, body: string} | null>(null);
 
   const loadMacros = () => fetch("/api/macros").then(r => r.json()).then(setMacros);
   const loadCompanies = () => fetch("/api/companies").then(r => r.json()).then(setCompanies);
@@ -36,17 +33,9 @@ export default function Macros() {
         addStep('click', { selector: event.data.selector });
       } else if (event.data.type === 'recorder_navigate') {
         const url = event.data.url;
-        if (!url.startsWith('http')) return;
         setProxyUrlInput(url);
+        setActiveProxyUrl(url);
         addStep('navigate', { value: url });
-        
-        if (event.data.method === 'POST') {
-          setProxyPostData({ url, body: event.data.body || '' });
-          setActiveProxyUrl('');
-        } else {
-          setProxyPostData(null);
-          setActiveProxyUrl(url);
-        }
       } else if (event.data.type === 'recorder_cert_request') {
         addStep('install_cert');
       }
@@ -54,14 +43,6 @@ export default function Macros() {
     window.addEventListener("message", handler);
     return () => window.removeEventListener("message", handler);
   }, [editingMacro]);
-
-  useEffect(() => {
-    if (proxyPostData) {
-      const form = document.getElementById('proxy-post-form') as HTMLFormElement;
-      form?.submit();
-      setProxyPostData(null);
-    }
-  }, [proxyPostData]);
 
   const handleSave = async () => {
     if(!editingMacro) return;
@@ -238,33 +219,16 @@ export default function Macros() {
                 </button>
               </div>
               <div className="flex-1 bg-white rounded-lg overflow-hidden border border-white/20 relative">
-                {proxyPostData && (
-                  <form
-                    id="proxy-post-form"
-                    method="POST"
-                    action={`/api/proxy?url=${encodeURIComponent(proxyPostData.url)}`}
-                    target="proxy-iframe"
-                    style={{ display: 'none' }}
-                  >
-                    {proxyPostData.body.split('&').map((pair, i) => {
-                      if (!pair) return null;
-                      const [k, v] = pair.split('=').map(decodeURIComponent);
-                      return <input key={i} type="hidden" name={k} defaultValue={v} />;
-                    })}
-                  </form>
-                )}
-                {!activeProxyUrl && !proxyPostData ? (
+                {!activeProxyUrl ? (
                   <div className="absolute inset-0 flex items-center justify-center text-slate-400 flex-col">
                     <p className="text-sm font-medium">Nenhuma URL Carregada</p>
                     <p className="text-xs text-slate-500 mt-2">Navegue para capturar elementos com apenas um clique</p>
                   </div>
                 ) : (
                   <iframe 
-                    name="proxy-iframe"
-                    src={activeProxyUrl ? `/api/proxy?url=${encodeURIComponent(activeProxyUrl)}` : undefined} 
-                    ref={iframeRef}
+                    src={`/api/proxy?url=${encodeURIComponent(activeProxyUrl)}`} 
                     className="w-full h-full border-none"
-                    sandbox="allow-scripts allow-same-origin allow-forms allow-top-navigation-by-user-activation"
+                    sandbox="allow-scripts allow-same-origin allow-forms"
                     title="Simulador de Gravação"
                   />
                 )}
