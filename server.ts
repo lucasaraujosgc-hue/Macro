@@ -17,6 +17,23 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+const stealthHeaders = {
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  Accept:
+    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+  "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+  "Sec-Ch-Ua":
+    '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+  "Sec-Ch-Ua-Mobile": "?0",
+  "Sec-Ch-Ua-Platform": '"Windows"',
+  "Sec-Fetch-Dest": "document",
+  "Sec-Fetch-Mode": "navigate",
+  "Sec-Fetch-Site": "none",
+  "Sec-Fetch-User": "?1",
+  "Upgrade-Insecure-Requests": "1",
+};
+
 // --- ASSET PROXY MIDDLEWARE ---
 // Catches assets that escaped the proxy prefix (e.g. absolute paths like /fonts/font.woff loaded from CSS)
 app.use(async (req, res, next) => {
@@ -42,10 +59,7 @@ app.use(async (req, res, next) => {
         );
 
         const response = await fetch(targetUrl, {
-          headers: {
-            "User-Agent":
-              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
-          },
+          headers: { ...stealthHeaders },
         });
 
         if (response.ok) {
@@ -203,11 +217,9 @@ app.post("/api/certificates/upload", upload.single("pfx"), async (req, res) => {
     res.json(certificate);
   } catch (error: any) {
     console.error(error);
-    res
-      .status(500)
-      .json({
-        error: "Invalid certificate or wrong password. " + error.message,
-      });
+    res.status(500).json({
+      error: "Invalid certificate or wrong password. " + error.message,
+    });
   }
 });
 
@@ -400,10 +412,7 @@ app.all("/api/proxy/raw/*", async (req, res) => {
     console.log(`[Proxy Fetch] ${req.method} ${targetUrl}`);
     const response = await fetch(targetUrl, {
       method: req.method,
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
-      }, // omit accept headers to avoid issues
+      headers: { ...stealthHeaders },
     });
 
     res.setHeader("Access-Control-Allow-Origin", "*");
@@ -505,11 +514,7 @@ app.all("/api/proxy", async (req, res) => {
     const fetchOptions: RequestInit = {
       method: req.method,
       headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
-        Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+        ...stealthHeaders,
         ...(req.method === "POST" && {
           "Content-Type": "application/x-www-form-urlencoded",
         }),
@@ -620,6 +625,20 @@ app.all("/api/proxy", async (req, res) => {
       (function() {
         if (window.__proxyPatched) return;
         window.__proxyPatched = true;
+
+        // Stealth overrides
+        try {
+          Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+          Object.defineProperty(navigator, 'languages', { get: () => ['pt-BR', 'pt', 'en-US', 'en'] });
+          Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+          const getParameter = WebGLRenderingContext.prototype.getParameter;
+          WebGLRenderingContext.prototype.getParameter = function(parameter) {
+            if (parameter === 37445) return 'Intel Inc.';
+            if (parameter === 37446) return 'Intel Iris OpenGL Engine';
+            return getParameter.apply(this, arguments);
+          };
+          window.chrome = { runtime: {} };
+        } catch(e) {}
 
         // Intercept dynamic script/link injections to proxy them
         const originalAppendChild = Element.prototype.appendChild;
