@@ -1,3 +1,4 @@
+import React from "react";
 import { useEffect, useState, useRef, useCallback } from "react";
 import { Macro, MacroStep, MacroStepType, Company } from "@/types";
 import { Plus, Trash2, Edit2, Play, Save, ChevronRight, GripVertical, CheckCircle2, AlertCircle, Loader2 } from "lucide-react";

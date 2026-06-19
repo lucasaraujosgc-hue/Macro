@@ -108,14 +108,17 @@ export default function Gallery() {
     const zip = new JSZip();
 
     const filesToZip = filteredFiles.filter((f) => selectedFiles.has(f.id));
-    filesToZip.forEach((f) => {
-      // Mocking file content creation for ZIP since real files aren't stored
-      // In a real app we would fetch the file blob and add it to the zip
-      zip.file(
-        f.filename,
-        `Contéudo simulado para o arquivo: ${f.filename}\nEmpresa: ${getCompanyInfo(f.companyId)}\nData: ${f.createdAt}`,
-      );
-    });
+    for (const f of filesToZip) {
+      if (f.downloadUrl) {
+        try {
+          const res = await fetch(f.downloadUrl);
+          const blob = await res.blob();
+          zip.file(f.filename, blob);
+        } catch (e) {
+          console.error("Error fetching file for zip:", e);
+        }
+      }
+    }
 
     const content = await zip.generateAsync({ type: "blob" });
     const url = URL.createObjectURL(content);
@@ -269,26 +272,14 @@ export default function Gallery() {
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
-                    const isPdf = file.filename.toLowerCase().endsWith('.pdf');
-                    let blob: Blob;
-                    if (isPdf) {
-                        const b64 = "JVBERi0xLjQKMSAwIG9iago8PAovVGl0bGUgKER1bW15IFBERikKPj4KZW5kb2JqCgoyIDAgb2JqCjw8Ci9UeXBlIC9DYXRhbG9nCi9QYWdlcyAzIDAgUgo+PgplbmRvYmoKCjMgMCBvYmoKPDwKL1R5cGUgL1BhZ2VzCi9Db3VudCAxCi9LaWRzIFsgNCAwIFIgXQo+PgplbmRvYmoKCjQgMCBvYmoKPDwKL1R5cGUgL1BhZ2UKL1BhcmVudCAzIDAgUgovUmVzb3VyY2VzIDw8Ci9Gb250IDw8Ci9GMSA1IDAgUgo+Pgo+PgovQ29udGVudHMgNiAwIFIKPj4KZW5kb2JqCgo1IDAgb2JqCjw8Ci9UeXBlIC9Gb250Ci9TdWJ0eXBlIC9UeXBlMQovQmFzZUZvbnQgL0hlbHZldGljYQo+PgplbmRvYmoKCjYgMCBvYmoKPDwKL0xlbmd0aCA0NQo+PgpzdHJlYW0KQlQKL0YxIDI0IFRmCjEwMCA3MDAgVGQKKEV4ZW1wbG8gZGUgQ29tcHJvdmFudGUpIFRqCkVUCmVuZHN0cmVhbQplbmRvYmoKCnhyZWYKMCA3CjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDAxMCAwMDAwMCBuIAowMDAwMDAwMDU5IDAwMDAwIG4gCjAwMDAwMDAxMDggMDAwMDAgbiAKMDAwMDAwMDE2NSAwMDAwMCBuIAowMDAwMDAwMjU0IDAwMDAwIG4gCjAwMDAwMDAzNDEgMDAwMDAgbiAKdHJhaWxlcgo8PAovU2l6ZSA3Ci9Sb290IDIgMCBSCj4+CnN0YXJ0eHJlZgo0MzcKJSVFT0Y=";
-                        const byteCharacters = atob(b64);
-                        const byteNumbers = new Array(byteCharacters.length);
-                        for (let i = 0; i < byteCharacters.length; i++) {
-                            byteNumbers[i] = byteCharacters.charCodeAt(i);
-                        }
-                        const byteArray = new Uint8Array(byteNumbers);
-                        blob = new Blob([byteArray], { type: "application/pdf" });
-                    } else {
-                        blob = new Blob([`Conteúdo simulado para: ${file.filename}`], { type: "text/plain" });
+                    if (file.downloadUrl) {
+                      const a = document.createElement("a");
+                      a.href = file.downloadUrl;
+                      a.download = file.filename;
+                      document.body.appendChild(a);
+                      a.click();
+                      document.body.removeChild(a);
                     }
-                    const a = document.createElement("a");
-                    a.href = URL.createObjectURL(blob);
-                    a.download = file.filename;
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
                   }}
                   className="p-2 bg-white/5 hover:bg-indigo-500/20 text-slate-400 hover:text-indigo-400 rounded-lg transition-colors z-10"
                   title="Baixar Arquivo"
