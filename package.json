@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
+    "@playwright/test": "^1.61.1",
     "@tailwindcss/vite": "^4.1.14",
     "@vitejs/plugin-react": "^5.0.4",
     "clsx": "^2.1.1",
@@ -25,6 +26,7 @@
     "multer": "^2.1.1",
     "node-forge": "^1.4.0",
     "pg": "^8.21.0",
+    "playwright": "^1.61.1",
     "puppeteer": "^25.1.0",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",

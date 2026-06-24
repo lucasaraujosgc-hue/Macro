@@ -1,3 +1,4 @@
+import { executionState, executeMacro } from './server/executor.ts';
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 
 import express from "express";
@@ -347,23 +348,7 @@ app.delete("/api/certificates/:id", async (req, res) => {
 
 type ExecutionStatus = "running" | "paused" | "completed" | "error" | "cancelled";
 
-interface ActiveExecution {
-  macroId: string;
-  status: ExecutionStatus;
-  currentStepIndex: number;
-  screenshot?: string;
-  currentUrl?: string;
-  logs: string[];
-  _resumeState?: {
-    macro: any;
-    targetCompanies: any[];
-    companyIndex: number;
-    nextStepIndex: number;
-  };
-  currentAction?: { type: string; selector?: string; value?: string };
-}
 
-let activeExecution: ActiveExecution | null = null;
 
 // Mutex to prevent concurrent execution state mutations
 let executionLock = false;
@@ -380,7 +365,7 @@ function releaseLock() {
 
 app.post("/api/execute/:macroId", async (req, res) => {
   // Prevent starting a new execution while one is already running
-  if (activeExecution && activeExecution.status === "running") {
+  if (executionState.activeExecution && executionState.activeExecution.status === "running") {
     return res.status(409).json({ error: "Já existe uma execução em andamento. Cancele-a primeiro." });
   }
 
@@ -393,7 +378,7 @@ app.post("/api/execute/:macroId", async (req, res) => {
   const targetCompanies = companies.filter((c) => companyIds.includes(c.id));
   const companyNames = targetCompanies.map((c) => c.razaoSocial).join(", ");
 
-  activeExecution = {
+  executionState.activeExecution = {
     macroId,
     status: "running",
     currentStepIndex: 0,
@@ -405,13 +390,13 @@ app.post("/api/execute/:macroId", async (req, res) => {
   };
 
   // Start execution async — don't await so request returns immediately
-  simulateExecution(macro, targetCompanies, 0, 0);
+  executeMacro(macro, targetCompanies, 0, 0);
 
-  res.json({ success: true, execution: activeExecution });
+  res.json({ success: true, execution: executionState.activeExecution });
 });
 
 app.get("/api/execution", (_req, res) => {
-  res.json(activeExecution);
+  res.json(executionState.activeExecution);
 });
 
 // Called by the frontend when proxy_download_captured fires during an execution
@@ -420,12 +405,12 @@ app.post("/api/execution/capture-file", async (req, res) => {
   const cf = capturedFiles.get(capturedId);
   if (!cf) return res.status(404).json({ error: "Captured file not found" });
 
-  if (activeExecution) {
-    const currentCompanies = activeExecution._resumeState?.targetCompanies;
-    const companyIndex = activeExecution._resumeState?.companyIndex;
+  if (executionState.activeExecution) {
+    const currentCompanies = executionState.activeExecution._resumeState?.targetCompanies;
+    const companyIndex = executionState.activeExecution._resumeState?.companyIndex;
     const company = currentCompanies?.[companyIndex ?? 0];
     cf.companyId = company?.id;
-    cf.macroId = activeExecution.macroId;
+    cf.macroId = executionState.activeExecution.macroId;
 
     // Persist to DB gallery
     await db.addFile({
@@ -438,123 +423,47 @@ app.post("/api/execution/capture-file", async (req, res) => {
       downloadUrl: `/api/captured/${cf.id}`,
     }).catch((e: Error) => console.error("[File Save Error]", e));
 
-    activeExecution.logs.push(`📥 PDF capturado: ${cf.filename} (${Math.round(cf.data.byteLength / 1024)} KB)`);
+    executionState.activeExecution.logs.push(`📥 PDF capturado: ${cf.filename} (${Math.round(cf.data.byteLength / 1024)} KB)`);
   }
 
   res.json({ success: true, filename: cf.filename });
 });
 
 app.post("/api/execution/cancel", (_req, res) => {
-  if (!activeExecution) return res.status(400).json({ error: "Nenhuma execução ativa" });
-  activeExecution.status = "cancelled";
-  activeExecution._resumeState = undefined;
-  activeExecution.logs.push("🛑 Execução cancelada pelo usuário.");
-  releaseLock();
+  if (!executionState.activeExecution) return res.status(400).json({ error: "Nenhuma execução ativa" });
+  executionState.activeExecution.status = "cancelled";
+  executionState.activeExecution._resumeState = undefined;
+  executionState.activeExecution.logs.push("🛑 Execução cancelada pelo usuário.");
   res.json({ success: true });
 });
 
 app.post("/api/execution/resolve-captcha", async (req, res) => {
-  if (!activeExecution || activeExecution.status !== "paused") {
+  if (!executionState.activeExecution || executionState.activeExecution.status !== "paused") {
     return res.status(400).json({ error: "Nenhuma execução pausada" });
   }
 
   const captchaText = req.body.text || "(sem texto)";
-  activeExecution.logs.push(`✅ Captcha resolvido: ${captchaText}`);
-  activeExecution.status = "running";
+  executionState.activeExecution.logs.push(`✅ Captcha resolvido: ${captchaText}`);
+  executionState.activeExecution.status = "running";
 
-  if (activeExecution._resumeState) {
+  if (executionState.activeExecution._resumeState) {
     const { macro, targetCompanies, companyIndex, nextStepIndex } =
-      activeExecution._resumeState;
-    activeExecution._resumeState = undefined;
+      executionState.activeExecution._resumeState;
+    executionState.activeExecution._resumeState = undefined;
     // Resume from the step AFTER the captcha_wait (nextStepIndex + 1 was already the next step)
-    simulateExecution(macro, targetCompanies, companyIndex, nextStepIndex);
+    executeMacro(macro, targetCompanies, companyIndex, nextStepIndex);
   } else {
-    const macro = await db.getMacro(activeExecution.macroId);
+    const macro = await db.getMacro(executionState.activeExecution.macroId);
     if (macro) {
-      const nextStep = activeExecution.currentStepIndex + 1;
-      simulateExecution(macro, [], 0, nextStep);
+      const nextStep = executionState.activeExecution.currentStepIndex + 1;
+      executeMacro(macro, [], 0, nextStep);
     }
   }
 
   res.json({ success: true });
 });
 
-function interpolateValue(value: string | undefined, company: any | null): string {
-  if (!value || !company) return value || "";
-  return value
-    .replace(/\{\{CNPJ\}\}/g, company.cnpj || "")
-    .replace(/\{\{RAZAO_SOCIAL\}\}/g, company.razaoSocial || "")
-    .replace(/\{\{FANTASIA\}\}/g, company.nomeFantasia || "")
-    .replace(/\{\{EMAIL\}\}/g, company.email || "")
-    .replace(/\{\{TELEFONE\}\}/g, company.telefone || "")
-    .replace(/\{\{IE\}\}/g, company.inscricaoEstadual || "")
-    .replace(/\{\{IM\}\}/g, company.inscricaoMunicipal || "");
-}
 
-function simulateExecution(
-  macro: any,
-  targetCompanies: any[],
-  companyIndex: number,
-  startIndex: number,
-) {
-  if (!activeExecution || activeExecution.status === "cancelled") {
-    releaseLock();
-    return;
-  }
-
-  if (targetCompanies.length > 0 && companyIndex >= targetCompanies.length) {
-    activeExecution.status = "completed";
-    activeExecution.logs.push("✅ Fim da execução para todas as empresas.");
-    releaseLock();
-    return;
-  }
-
-  const currentCompany = targetCompanies.length > 0 ? targetCompanies[companyIndex] : null;
-  if (startIndex === 0 && currentCompany) {
-    activeExecution.logs.push(`🏢 Tratando empresa: ${currentCompany.razaoSocial} (${currentCompany.cnpj || ''})`);
-  }
-
-  const step = macro.steps[startIndex];
-  if (!step) {
-    if (targetCompanies.length > 0 && companyIndex + 1 < targetCompanies.length) {
-      setTimeout(() => simulateExecution(macro, targetCompanies, companyIndex + 1, 0), 1000);
-    } else {
-      activeExecution.status = "completed";
-      activeExecution.logs.push("✅ Fim da execução.");
-      releaseLock();
-    }
-    return;
-  }
-
-  activeExecution.currentStepIndex = startIndex;
-  activeExecution.currentAction = step;
-  const value = interpolateValue(step.value, currentCompany) || "";
-
-  if (step.type === "navigate") {
-    activeExecution.logs.push(`🌐 Navegando para ${step.value}`);
-    activeExecution.currentUrl = step.value;
-  } else if (step.type === "click") {
-    activeExecution.logs.push(`🖱️ Clicando em ${step.selector}`);
-  } else if (step.type === "type") {
-    activeExecution.logs.push(`⌨️ Digitando em ${step.selector}: ${value}`);
-  } else if (step.type === "captcha_wait") {
-    activeExecution.logs.push(`⏳ Aguardando solução de Captcha manual...`);
-    activeExecution.status = "paused";
-    activeExecution._resumeState = { macro, targetCompanies, companyIndex, nextStepIndex: startIndex + 1 };
-    releaseLock();
-    return;
-  } else if (step.type === "download_wait") {
-    activeExecution.logs.push(`⏳ Aguardando download...`);
-  } else {
-    activeExecution.logs.push(`⏳ Executando ${step.type}`);
-  }
-
-  setTimeout(() => {
-    if (activeExecution?.status === "running") {
-      simulateExecution(macro, targetCompanies, companyIndex, startIndex + 1);
-    }
-  }, 1500);
-}
 
 const rewriteCookies = (response, res) => {
   const setCookie = response.headers.getSetCookie?.() || [];
@@ -645,7 +554,11 @@ app.all("/api/proxy/raw/*", async (req, res) => {
   }
 });
 
+import { runDiagnostics } from './server/diagnostics.ts';
+
 async function startServer() {
+  await runDiagnostics();
+  
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
