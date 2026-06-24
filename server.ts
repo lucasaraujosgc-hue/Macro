@@ -520,6 +520,49 @@ app.all("/api/proxy", async (req, res) => {
     if (contentType.includes("text/html")) {
        let html = Buffer.from(buffer).toString("utf-8");
        
+       const scriptInject = `<script>
+         (function() {
+           function getSelector(el) {
+             if (el.tagName.toLowerCase() == "html") return "HTML";
+             var str = el.tagName.toLowerCase();
+             str += (el.id != "") ? "#" + el.id : "";
+             if (el.className) {
+               var classes = typeof el.className === 'string' ? el.className.trim().split(/\\s+/) : [];
+               for (var i = 0; i < classes.length; i++) {
+                 if (classes[i]) str += "." + classes[i];
+               }
+             }
+             return str;
+           }
+
+           document.addEventListener('click', e => {
+             let selector = getSelector(e.target);
+             window.parent.postMessage({ type: 'recorder_click', selector }, '*');
+             
+             let current = e.target;
+             while(current && current.tagName !== 'A') {
+               current = current.parentNode;
+             }
+             if (current && current.tagName === 'A' && current.href) {
+               e.preventDefault();
+               e.stopPropagation();
+               let href = current.getAttribute('href');
+               if (href && !href.startsWith('javascript:')) {
+                  window.parent.postMessage({ type: 'recorder_navigate', url: current.href }, '*');
+                  window.location.href = '/api/proxy?url=' + encodeURIComponent(current.href) + '&topLevel=true';
+               }
+             }
+           }, true);
+
+           document.addEventListener('change', e => {
+             let selector = getSelector(e.target);
+             window.parent.postMessage({ type: 'recorder_type', selector, value: e.target.value }, '*');
+           }, true);
+         })();
+       </script>`;
+       
+       html = html.replace('</body>', scriptInject + '</body>');
+       
        // Rewrite resources to go through proxy
        html = html.replace(/(src|href)=["']([^"']+)["']/g, (match, p1, p2) => {
           if (p2.startsWith('http')) {
@@ -628,6 +671,61 @@ app.all("/api/proxy/raw/*", async (req, res) => {
 });
 
 import { runDiagnostics } from './server/diagnostics.ts';
+import { getRemotePage, getSelectorAtPoint, takeRemoteScreenshot } from './server/remote.ts';
+
+app.post("/api/remote/start", async (req, res) => {
+  try {
+    const { url } = req.body;
+    const page = await getRemotePage();
+    await page.goto(url, { waitUntil: 'load' });
+    const screenshot = await takeRemoteScreenshot(page);
+    res.json({ success: true, url: page.url(), screenshot });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/remote/click", async (req, res) => {
+  try {
+    const { x, y, viewportWidth, viewportHeight } = req.body;
+    const page = await getRemotePage();
+    
+    // Scale coordinates if the client viewport differs from Playwright's 1280x720
+    const scaleX = 1280 / viewportWidth;
+    const scaleY = 720 / viewportHeight;
+    const pX = Math.round(x * scaleX);
+    const pY = Math.round(y * scaleY);
+    
+    const selector = await getSelectorAtPoint(page, pX, pY);
+    
+    // Check if it's an input
+    const isInput = await page.evaluate(({pX, pY}) => {
+       const el = document.elementFromPoint(pX, pY);
+       return el ? ['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName) : false;
+    }, {pX, pY});
+    
+    await page.mouse.click(pX, pY);
+    // Wait a bit for navigation or state change
+    await page.waitForTimeout(1000);
+    
+    const screenshot = await takeRemoteScreenshot(page);
+    res.json({ success: true, selector, isInput, url: page.url(), screenshot });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/remote/type", async (req, res) => {
+  try {
+    const { selector, text } = req.body;
+    const page = await getRemotePage();
+    await page.locator(selector).fill(text);
+    const screenshot = await takeRemoteScreenshot(page);
+    res.json({ success: true, url: page.url(), screenshot });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 async function startServer() {
   await runDiagnostics();

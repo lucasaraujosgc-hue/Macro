@@ -43,6 +43,7 @@ export default function Macros() {
   const [playwrightMode, setPlaywrightMode] = useState(false);
   const [playwrightConnected, setPlaywrightConnected] = useState(false);
   const [playwrightRemoteUrl, setPlaywrightRemoteUrl] = useState("");
+  const [playwrightScreenshot, setPlaywrightScreenshot] = useState<string | null>(null);
 
   const [draggedStepIndex, setDraggedStepIndex] = useState<number | null>(null);
 
@@ -161,12 +162,31 @@ export default function Macros() {
 
   // ── URL bar navigation — deduplicates Enter + button click ──────────────────
 
-  const navigateToUrl = useCallback(() => {
+  const navigateToUrl = useCallback(async () => {
     if (!proxyUrlInput) return;
-    setPlaywrightMode(false);
+    
+    // Always use Playwright mode because iframe proxy breaks React apps
+    setPlaywrightMode(true);
+    setPlaywrightConnected(false);
+    setPlaywrightRemoteUrl(proxyUrlInput);
+    setActiveProxyUrl("");
     setProxyPostData(null);
-    setActiveProxyUrl(proxyUrlInput);
     addStep("navigate", { value: proxyUrlInput });
+    
+    try {
+      const res = await fetch("/api/remote/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: proxyUrlInput })
+      });
+      const data = await res.json();
+      if (data.success && data.screenshot) {
+         setPlaywrightScreenshot(data.screenshot);
+      }
+    } catch (e) {
+      console.error(e);
+    }
+    setPlaywrightConnected(true);
   }, [proxyUrlInput, addStep]);
 
   // ── Save ────────────────────────────────────────────────────────────────────
@@ -565,107 +585,59 @@ export default function Macros() {
                         </span>
                       </div>
 
-                      {/* Mock gov.br screen */}
-                      <div
-                        className="flex-1 flex items-center justify-center p-8 mt-8 custom-scrollbar"
-                        onClick={(e) => {
-                          const target = e.target as HTMLElement;
-                          let selector = "";
-                          if (target.id) {
-                            selector = "#" + target.id;
-                          } else {
-                            const safeClasses = Array.from(target.classList)
-                              .filter((c) => /^[a-zA-Z_-][a-zA-Z0-9_-]*$/.test(c))
-                              .slice(0, 2);
-                            selector = target.tagName.toLowerCase();
-                            if (safeClasses.length) selector += "." + safeClasses.join(".");
-                          }
-                          const isInput = ["input", "textarea", "select"].includes(
-                            target.tagName.toLowerCase(),
-                          );
-                          addStep(isInput ? "type" : "click", { selector, ...(isInput ? { value: "" } : {}) });
-                        }}
-                      >
-                        <div className="w-full max-w-3xl bg-white shadow-2xl rounded-xl border border-slate-200 p-8">
-                          <div className="flex justify-between items-center mb-10 border-b pb-4">
-                            <div className="flex items-center space-x-3">
-                              <div className="w-10 h-10 bg-blue-900 rounded-full flex items-center justify-center font-bold text-white text-xl">
-                                BR
-                              </div>
-                              <div>
-                                <h2 className="text-2xl font-bold text-blue-900 leading-tight">Portal Governamental</h2>
-                                <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Acesso Seguro</div>
-                              </div>
-                            </div>
-                            <div className="w-20 border-b-2 border-green-500" />
-                          </div>
-
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                            <div className="space-y-4">
-                              <button
-                                id="btn-govbr-login"
-                                className="w-full bg-[#1351b4] hover:bg-blue-800 text-white font-bold py-3.5 px-4 rounded-full flex items-center justify-center transition shadow-md"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  addStep("click", { selector: "button#btn-govbr-login" });
-                                }}
-                              >
-                                Entrar com gov.br
-                              </button>
-
-                              <div className="flex items-center space-x-2 my-6">
-                                <div className="flex-1 border-t border-slate-200" />
-                                <span className="text-xs text-slate-500 font-semibold uppercase tracking-wider">Outras Opções</span>
-                                <div className="flex-1 border-t border-slate-200" />
-                              </div>
-
-                              <button
-                                id="btn-certificado-digital"
-                                className="w-full border-2 border-blue-900 text-blue-900 hover:bg-blue-50 font-bold py-3.5 px-4 rounded-full flex items-center justify-center transition"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  addStep("install_cert", {});
-                                  setTimeout(
-                                    () =>
-                                      alert(
-                                        "Ação interceptada pelo Playwright!\n\nCertificado digital inserido via CDP (Chrome DevTools Protocol) no node isolado com sucesso.",
-                                      ),
-                                    400,
-                                  );
-                                }}
-                              >
-                                Seu Certificado Digital
-                              </button>
-
-                              <button
-                                id="btn-codigo-acesso"
-                                className="w-full border-2 border-slate-300 text-slate-600 hover:bg-slate-50 font-bold py-3.5 px-4 rounded-full flex items-center justify-center transition"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  addStep("click", { selector: "button#btn-codigo-acesso" });
-                                }}
-                              >
-                                Código de Acesso
-                              </button>
-                            </div>
-
-                            <div className="bg-slate-50 p-6 rounded-xl text-sm border border-slate-200 relative overflow-hidden">
-                              <div className="absolute right-0 top-0 w-24 h-24 bg-green-500/10 rounded-bl-full -mr-2 -mt-2" />
-                              <h3 className="font-bold text-slate-800 mb-3 text-base">Acesso Remoto Estabelecido</h3>
-                              <div className="text-slate-600 space-y-3 leading-relaxed">
-                                <p>O simulador está refletindo a interface web processada pelo container Playwright seguro usando VNC-over-WebSocket.</p>
-                                <p><strong>CORS / CSP Bypass:</strong> ATIVO ✓</p>
-                                <p><strong>ICP-Brasil Provider:</strong> CARREGADO ✓</p>
-                                <div className="mt-4 p-3 bg-blue-100 text-blue-800 rounded flex items-start space-x-2 border border-blue-200">
-                                  <span className="font-bold shrink-0">Dica:</span>
-                                  <span className="text-xs">
-                                    Clique nos botões desta interface mockada para que o gravador capture a sequência do Playwright Automation.
-                                  </span>
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-                        </div>
+                      {/* Remote Browser Screen */}
+                      <div className="flex-1 w-full bg-[#1e1e1e] flex items-center justify-center overflow-auto relative mt-8">
+                        {playwrightScreenshot ? (
+                           <img 
+                              src={playwrightScreenshot}
+                              alt="Remote Playwright View"
+                              className="max-w-none shadow-2xl cursor-crosshair border border-[#333]"
+                              onClick={async (e) => {
+                                 const rect = e.currentTarget.getBoundingClientRect();
+                                 const x = e.clientX - rect.left;
+                                 const y = e.clientY - rect.top;
+                                 
+                                 // Add visual feedback immediately
+                                 const overlay = document.createElement("div");
+                                 overlay.className = "absolute w-4 h-4 bg-indigo-500 rounded-full animate-ping pointer-events-none transform -translate-x-1/2 -translate-y-1/2 z-50";
+                                 overlay.style.left = `${e.clientX}px`;
+                                 overlay.style.top = `${e.clientY}px`;
+                                 document.body.appendChild(overlay);
+                                 setTimeout(() => overlay.remove(), 1000);
+                                 
+                                 try {
+                                    setPlaywrightConnected(false); // Show loading briefly
+                                    const res = await fetch("/api/remote/click", {
+                                       method: "POST",
+                                       headers: { "Content-Type": "application/json" },
+                                       body: JSON.stringify({
+                                          x,
+                                          y,
+                                          viewportWidth: rect.width,
+                                          viewportHeight: rect.height
+                                       })
+                                    });
+                                    const data = await res.json();
+                                    if (data.success) {
+                                       if (data.screenshot) setPlaywrightScreenshot(data.screenshot);
+                                       if (data.url) setPlaywrightRemoteUrl(data.url);
+                                       if (data.selector) {
+                                          addStep(data.isInput ? "type" : "click", { 
+                                             selector: data.selector,
+                                             ...(data.isInput ? { value: "" } : {})
+                                          });
+                                       }
+                                    }
+                                 } catch (err) {
+                                    console.error(err);
+                                 } finally {
+                                    setPlaywrightConnected(true);
+                                 }
+                              }}
+                           />
+                        ) : (
+                           <div className="text-slate-500 text-sm animate-pulse">Aguardando frame de vídeo...</div>
+                        )}
                       </div>
                     </div>
                   )
