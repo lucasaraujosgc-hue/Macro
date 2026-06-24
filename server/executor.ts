@@ -94,7 +94,7 @@ export async function executeMacro(
 
     // Step Iteration Loop inside Playwright
     for (let i = startIndex; i < macro.steps.length; i++) {
-      if (executionState.activeExecution.status === "cancelled") break;
+      if ((executionState.activeExecution.status as string) === "cancelled") break;
 
       const step = macro.steps[i];
       executionState.activeExecution.currentStepIndex = i;
