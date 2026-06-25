@@ -1,5 +1,4 @@
-import React from "react";
-import { useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Company, Certificate } from "@/types";
 import { Plus, Trash2, Edit2, Building } from "lucide-react";
 

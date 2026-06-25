@@ -23,6 +23,7 @@ export interface Certificate {
   id: string;
   filename: string;
   passwordEncrypted: string; 
+  pfxBase64?: string;
   titular: string;
   cpfCnpj: string;
   serial: string;

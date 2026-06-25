@@ -1,5 +1,4 @@
-import React from "react";
-import { useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Certificate } from "@/types";
 import { Upload, Trash2, KeyRound } from "lucide-react";
 import { parseISO } from "date-fns";

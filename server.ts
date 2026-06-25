@@ -1,4 +1,3 @@
-import { executionState, executeMacro } from './server/executor.ts';
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 
 import express from "express";
@@ -6,161 +5,166 @@ import path from "path";
 import cors from "cors";
 import { createServer as createViteServer } from "vite";
 import { db, initDB } from "./server/db";
+import { chromium, Browser, BrowserContext, Page } from 'playwright';
 import multer from "multer";
 import { v4 as uuidv4 } from "uuid";
+// @ts-ignore
 import forge from "node-forge";
-import { CookieJar } from "tough-cookie";
-import { fileURLToPath } from "url";
-import fs from "fs";
 
 const app = express();
-const PORT = Number(process.env.PORT) || 3000;
+const PORT = 3000;
 
 app.use(cors());
-app.use(express.json({ limit: "5mb" }));
-app.use(express.urlencoded({ extended: true, limit: "5mb" }));
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-// ── Shared error responder ────────────────────────────────────────────────────
-function sendError(res: express.Response, e: unknown, status = 500) {
-  const message = e instanceof Error ? e.message : String(e);
-  res.status(status).json({ error: message });
-}
+let browser: Browser | null = null;
+let context: BrowserContext | null = null;
+let page: Page | null = null;
 
-const stealthHeaders: Record<string, string> = {
-  "User-Agent":
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-  Accept:
-    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-  "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
-  "Sec-Ch-Ua":
-    '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-  "Sec-Ch-Ua-Mobile": "?0",
-  "Sec-Ch-Ua-Platform": '"Windows"',
-  "Sec-Fetch-Dest": "document",
-  "Sec-Fetch-Mode": "navigate",
-  "Sec-Fetch-Site": "none",
-  "Sec-Fetch-User": "?1",
-  "Upgrade-Insecure-Requests": "1",
-};
-
-// ─── Per-execution cookie jar (persists session across proxy requests) ──────────
-// Keyed by executionId so multiple concurrent sessions don't share cookies.
-// For single-user use, we keep one global "recording" jar for the simulator.
-const sessionJars: Map<string, CookieJar> = new Map();
-const RECORDING_SESSION = "recording";
-
-function getJar(sessionId: string): CookieJar {
-  if (!sessionJars.has(sessionId)) sessionJars.set(sessionId, new CookieJar());
-  return sessionJars.get(sessionId)!;
-}
-
-async function cookiesToHeader(jar: CookieJar, url: string): Promise<string> {
-  try { return await jar.getCookieString(url); } catch { return ""; }
-}
-
-async function storeCookies(jar: CookieJar, response: Response, targetUrl: string) {
-  const setCookieHeaders = response.headers.getSetCookie?.() ?? [];
-  for (const cookie of setCookieHeaders) {
-    try { await jar.setCookie(cookie, targetUrl); } catch { /* ignore invalid */ }
-  }
-}
-
-// ─── In-memory capture store for real PDFs downloaded through the proxy ────────
-interface CapturedFile {
-  id: string;
-  filename: string;
-  mimeType: string;
-  data: Buffer;         // raw bytes — served via /api/captured/:id
-  capturedAt: string;
-  sessionId: string;
-  companyId?: string;
-  macroId?: string;
-}
-const capturedFiles: Map<string, CapturedFile> = new Map();
-
-// Serve captured file bytes to the browser for real download / gallery save
-app.get("/api/captured/:id", (req, res) => {
-  const cf = capturedFiles.get(req.params.id);
-  if (!cf) return res.status(404).json({ error: "Arquivo não encontrado" });
-  res.setHeader("Content-Type", cf.mimeType);
-  res.setHeader("Content-Disposition", `attachment; filename="${cf.filename}"`);
-  res.setHeader("Content-Length", cf.data.byteLength);
-  res.send(cf.data);
-});
-
-// Accept base64 blob PDF from client-side interception
-app.post("/api/captured-blob", async (req, res) => {
-  try {
-    const { dataUrl, mimeType = "application/pdf", filename = "download.pdf" } = req.body;
-    if (!dataUrl || !dataUrl.startsWith("data:")) {
-      return res.status(400).json({ error: "Invalid dataUrl" });
-    }
-    const base64 = dataUrl.split(",")[1];
-    const data = Buffer.from(base64, "base64");
-
-    const captured: CapturedFile = {
-      id: uuidv4(),
-      filename,
-      mimeType,
-      data,
-      capturedAt: new Date().toISOString(),
-      sessionId: RECORDING_SESSION,
-    };
-    capturedFiles.set(captured.id, captured);
-    console.log(`[Blob Capture] ${filename} (${data.byteLength} bytes)`);
-    res.json({ id: captured.id, filename, size: data.byteLength, url: `/api/captured/${captured.id}` });
-  } catch (e) { sendError(res, e); }
-});
-
-// List captured files for a session
-app.get("/api/captured", (req, res) => {
-  const sessionId = (req.query.session as string) || RECORDING_SESSION;
-  const files = [...capturedFiles.values()]
-    .filter(f => f.sessionId === sessionId)
-    .map(({ data: _data, ...meta }) => meta); // strip binary from list
-  res.json(files);
-});
-
-// ─── ASSET PROXY MIDDLEWARE ────────────────────────────────────────────────────
-// Catches assets that escaped the proxy prefix (e.g. absolute paths like /fonts/font.woff loaded from CSS)
-app.use(async (req, res, next) => {
-  if (
-    req.originalUrl.startsWith("/api/") ||
-    req.originalUrl.startsWith("/@") ||
-    req.originalUrl.startsWith("/node_modules/")
-  ) {
-    return next();
-  }
-
-  const referer = req.headers.referer;
-  if (referer && referer.includes("/api/proxy/raw/")) {
+// Helper para iniciar o Playwright
+async function getPage() {
+  if (!browser) {
     try {
-      const match = referer.match(/\/api\/proxy\/raw\/(.+)/);
-      if (match && match[1]) {
-        const targetBase = decodeURIComponent(match[1]);
-        const targetUrl = new URL(req.originalUrl, targetBase).href;
-
-        console.log(
-          `[Proxy Recovery] Proxying escaped asset ${req.originalUrl} to ${targetUrl}`,
-        );
-
-        const response = await fetch(targetUrl, {
-          headers: { ...stealthHeaders },
-        });
-
-        if (response.ok) {
-          const contentType = response.headers.get("content-type") || "";
-          res.setHeader("Content-Type", contentType);
-          res.setHeader("Access-Control-Allow-Origin", "*");
-          const buffer = await response.arrayBuffer();
-          return res.send(Buffer.from(buffer));
-        }
-      }
-    } catch (e) {
-      console.error("[Proxy Recovery Error]", req.originalUrl, e);
+      browser = await chromium.launch({
+        headless: true,
+        args: [
+          '--no-sandbox', 
+          '--disable-setuid-sandbox', 
+          '--disable-dev-shm-usage',
+          '--disable-gpu'
+        ]
+      });
+    } catch (err: any) {
+      console.error("Erro ao iniciar Playwright:", err.message);
+      throw new Error("Falha ao iniciar navegador: " + err.message);
     }
   }
-  next();
+  
+  if (!context && browser) {
+    const certificates = await db.getCertificates();
+    const clientCertificates: any[] = [];
+    
+    for (const cert of certificates) {
+      if (!cert.pfxBase64 || !cert.passwordEncrypted) continue;
+      try {
+        const pfxBuffer = Buffer.from(cert.pfxBase64, 'base64');
+        const passphrase = Buffer.from(cert.passwordEncrypted, 'base64').toString('utf8');
+        
+        // Add to known ICP-Brasil endpoints
+        clientCertificates.push({
+          origin: 'https://certificado.sso.acesso.gov.br',
+          pfx: pfxBuffer,
+          passphrase
+        });
+        clientCertificates.push({
+          origin: 'https://sso.acesso.gov.br',
+          pfx: pfxBuffer,
+          passphrase
+        });
+        clientCertificates.push({
+          origin: 'https://cav.receita.fazenda.gov.br',
+          pfx: pfxBuffer,
+          passphrase
+        });
+      } catch (e) {
+      }
+    }
+
+    context = await browser.newContext({
+      viewport: { width: 1280, height: 800 },
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      clientCertificates,
+      ignoreHTTPSErrors: true,
+    });
+  }
+
+  if (!page && context) {
+    page = await context.newPage();
+  }
+  return page;
+}
+
+app.post('/api/browser/goto', async (req, res) => {
+  try {
+    const { url } = req.body;
+    const p = await getPage();
+    if (!p) throw new Error("Página não encontrada");
+    await p.goto(url, { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
+    const screenshotBuffer = await p.screenshot({ type: 'jpeg', quality: 70 });
+    const screenshot = screenshotBuffer.toString('base64');
+    const currentUrl = p.url();
+    const title = await p.title();
+    res.json({ screenshot: `data:image/jpeg;base64,${screenshot}`, url: currentUrl, title });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/browser/click', async (req, res) => {
+  try {
+    const { x, y } = req.body;
+    const p = await getPage();
+    if (!p) throw new Error("Página não encontrada");
+    await p.mouse.click(x, y);
+    await new Promise(r => setTimeout(r, 400));
+    const screenshotBuffer = await p.screenshot({ type: 'jpeg', quality: 70 });
+    const screenshot = screenshotBuffer.toString('base64');
+    const currentUrl = p.url();
+    const title = await p.title();
+    res.json({ screenshot: `data:image/jpeg;base64,${screenshot}`, url: currentUrl, title });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/browser/type', async (req, res) => {
+  try {
+    const { text, key } = req.body;
+    const p = await getPage();
+    if (!p) throw new Error("Página não encontrada");
+    if (text) {
+      await p.keyboard.type(text);
+    }
+    if (key) {
+      await p.keyboard.press(key);
+    }
+    
+    await new Promise(r => setTimeout(r, 200));
+    const screenshotBuffer = await p.screenshot({ type: 'jpeg', quality: 70 });
+    const screenshot = screenshotBuffer.toString('base64');
+    res.json({ screenshot: `data:image/jpeg;base64,${screenshot}`, url: p.url() });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/browser/scroll', async (req, res) => {
+  try {
+    const { deltaY } = req.body;
+    const p = await getPage();
+    if (!p) throw new Error("Página não encontrada");
+    await p.evaluate((y) => window.scrollBy(0, y), deltaY);
+    await new Promise(r => setTimeout(r, 150));
+    const screenshotBuffer = await p.screenshot({ type: 'jpeg', quality: 70 });
+    const screenshot = screenshotBuffer.toString('base64');
+    res.json({ screenshot: `data:image/jpeg;base64,${screenshot}`, url: p.url() });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/browser/close', async (req, res) => {
+  if (context) {
+    await context.close();
+    context = null;
+    page = null;
+  }
+  if (browser) {
+    await browser.close();
+    browser = null;
+  }
+  res.json({ success: true });
 });
 
 const upload = multer({ storage: multer.memoryStorage() });
@@ -168,94 +172,66 @@ const upload = multer({ storage: multer.memoryStorage() });
 // --- API ROUTES ---
 
 // Companies
-app.get("/api/companies", async (_req, res) => {
-  try {
-    res.json(await db.getCompanies());
-  } catch (e) { sendError(res, e); }
+app.get("/api/companies", async (req, res) => {
+  res.json(await db.getCompanies());
 });
 
 app.post("/api/companies", async (req, res) => {
-  try {
-    if (!req.body.razaoSocial?.trim()) {
-      return res.status(400).json({ error: "Razão social é obrigatória." });
-    }
-    const company = { ...req.body, id: uuidv4() };
-    await db.addCompany(company);
-    res.json(company);
-  } catch (e) { sendError(res, e); }
+  const company = { ...req.body, id: uuidv4() };
+  await db.addCompany(company);
+  res.json(company);
 });
 
 app.put("/api/companies/:id", async (req, res) => {
-  try {
-    await db.updateCompany(req.params.id, req.body);
-    res.json({ success: true });
-  } catch (e) { sendError(res, e); }
+  await db.updateCompany(req.params.id, req.body);
+  res.json({ success: true });
 });
 
 app.delete("/api/companies/:id", async (req, res) => {
-  try {
-    await db.deleteCompany(req.params.id);
-    res.json({ success: true });
-  } catch (e) { sendError(res, e); }
+  await db.deleteCompany(req.params.id);
+  res.json({ success: true });
 });
 
 // Macros
-app.get("/api/macros", async (_req, res) => {
-  try {
-    res.json(await db.getMacros());
-  } catch (e) { sendError(res, e); }
+app.get("/api/macros", async (req, res) => {
+  res.json(await db.getMacros());
 });
 
 app.post("/api/macros", async (req, res) => {
-  try {
-    if (!req.body.name?.trim()) {
-      return res.status(400).json({ error: "O nome da macro é obrigatório." });
-    }
-    const macro = { ...req.body, id: uuidv4() };
-    if (!macro.steps) macro.steps = [];
-    await db.addMacro(macro);
-    res.json(macro);
-  } catch (e) { sendError(res, e); }
+  const macro = { ...req.body, id: uuidv4() };
+  if (!macro.steps) macro.steps = [];
+  await db.addMacro(macro);
+  res.json(macro);
 });
 
 app.put("/api/macros/:id", async (req, res) => {
-  try {
-    await db.updateMacro(req.params.id, req.body);
-    res.json({ success: true });
-  } catch (e) { sendError(res, e); }
+  await db.updateMacro(req.params.id, req.body);
+  res.json({ success: true });
 });
 
 app.delete("/api/macros/:id", async (req, res) => {
-  try {
-    await db.deleteMacro(req.params.id);
-    res.json({ success: true });
-  } catch (e) { sendError(res, e); }
+  await db.deleteMacro(req.params.id);
+  res.json({ success: true });
 });
 
 // Files
-app.get("/api/files", async (_req, res) => {
-  try {
-    res.json(await db.getFiles());
-  } catch (e) { sendError(res, e); }
+app.get("/api/files", async (req, res) => {
+  res.json(await db.getFiles());
 });
 
 app.post("/api/files", async (req, res) => {
-  try {
-    const file = {
-      ...req.body,
-      id: uuidv4(),
-      createdAt: new Date().toISOString(),
-    };
-    await db.addFile(file);
-    res.json(file);
-  } catch (e) { sendError(res, e); }
+  const file = {
+    ...req.body,
+    id: uuidv4(),
+    createdAt: new Date().toISOString(),
+  };
+  await db.addFile(file);
+  res.json(file);
 });
 
 // Certificates
-app.get("/api/certificates", async (_req, res) => {
-  try {
-    res.json(await db.getCertificates());
-  } catch (e) { sendError(res, e); }
+app.get("/api/certificates", async (req, res) => {
+  res.json(await db.getCertificates());
 });
 
 app.post("/api/certificates/upload", upload.single("pfx"), async (req, res) => {
@@ -264,7 +240,8 @@ app.post("/api/certificates/upload", upload.single("pfx"), async (req, res) => {
     const password = req.body.password;
 
     if (!file) return res.status(400).json({ error: "No file uploaded" });
-    if (!password) return res.status(400).json({ error: "Password is required" });
+    if (!password)
+      return res.status(400).json({ error: "Password is required" });
 
     // Parse PFX
     const p12Asn1 = forge.asn1.fromDer(file.buffer.toString("binary"));
@@ -296,7 +273,7 @@ app.post("/api/certificates/upload", upload.single("pfx"), async (req, res) => {
           acc[attr.shortName || attr.name] = attr.value;
           return acc;
         },
-        {},
+        {}
       );
 
       titular = subject["CN"] || "Unknown";
@@ -310,13 +287,13 @@ app.post("/api/certificates/upload", upload.single("pfx"), async (req, res) => {
       }
     }
 
-    // CPF = 11 digits, CNPJ = 14 digits
     const type = cpfCnpj.replace(/\D/g, "").length > 11 ? "PJ" : "PF";
 
-    // Store password as base64 — NOTE: production should use proper encryption (AES-256-GCM etc.)
     const certificate = {
       id: uuidv4(),
+      name: titular, // Use titular as name for the existing UI
       filename: file.originalname,
+      pfxBase64: file.buffer.toString("base64"),
       passwordEncrypted: Buffer.from(password).toString("base64"),
       titular,
       cpfCnpj,
@@ -325,411 +302,213 @@ app.post("/api/certificates/upload", upload.single("pfx"), async (req, res) => {
       validFrom: validFrom.toISOString(),
       validTo: validTo.toISOString(),
       type: type as "PF" | "PJ",
+      valid: true,
+      uploadedAt: new Date().toISOString()
     };
 
     await db.addCertificate(certificate);
-    res.json(certificate);
+
+    // Fechar o contexto atual para que no próximo getPage ele recarregue com o novo certificado
+    if (context) {
+      await context.close();
+      context = null;
+      page = null;
+    }
+
+    res.json({ success: true, message: 'Certificado e senha válidos!', certificate });
   } catch (error: any) {
     console.error("[Certificate Upload Error]", error);
-    res.status(500).json({
-      error: "Certificado inválido ou senha incorreta. " + error.message,
-    });
+    res
+      .status(500)
+      .json({
+        error: "Certificado inválido ou senha incorreta. " + error.message,
+      });
   }
 });
 
 app.delete("/api/certificates/:id", async (req, res) => {
-  try {
-    await db.deleteCertificate(req.params.id);
-    res.json({ success: true });
-  } catch (e) { sendError(res, e); }
+  await db.deleteCertificate(req.params.id);
+  res.json({ success: true });
 });
 
-// --- EXECUTION ENGINE ---
-
-type ExecutionStatus = "running" | "paused" | "completed" | "error" | "cancelled";
-
-
-
-// Mutex to prevent concurrent execution state mutations
-let executionLock = false;
-
-function acquireLock(): boolean {
-  if (executionLock) return false;
-  executionLock = true;
-  return true;
-}
-
-function releaseLock() {
-  executionLock = false;
-}
+// Helper execution endpoints
+let activeExecution: {
+  macroId: string;
+  status: "running" | "paused" | "completed" | "error";
+  currentStepIndex: number;
+  screenshot?: string;
+  currentUrl?: string;
+  logs: string[];
+  _resumeState?: any;
+  currentAction?: { type: string; selector?: string; value?: string };
+} | null = null;
 
 app.post("/api/execute/:macroId", async (req, res) => {
-  // Prevent starting a new execution while one is already running
-  if (executionState.activeExecution && executionState.activeExecution.status === "running") {
-    return res.status(409).json({ error: "Já existe uma execução em andamento. Cancele-a primeiro." });
-  }
-
   const macroId = req.params.macroId;
-  const companyIds: string[] = req.body.companyIds || [];
+  const companyIds = req.body.companyIds || [];
   const macro = await db.getMacro(macroId);
-  if (!macro) return res.status(404).json({ error: "Macro não encontrada" });
+  if (!macro) return res.status(404).json({ error: "Macro not found" });
 
   const companies = await db.getCompanies();
   const targetCompanies = companies.filter((c) => companyIds.includes(c.id));
   const companyNames = targetCompanies.map((c) => c.razaoSocial).join(", ");
 
-  executionState.activeExecution = {
+  activeExecution = {
     macroId,
     status: "running",
     currentStepIndex: 0,
     currentUrl: "about:blank",
     logs: [
-      `▶️ Iniciando macro: ${macro.name}`,
-      `Empresas selecionadas (${targetCompanies.length}): ${companyNames || "(nenhuma)"}`,
+      `Started macro ${macro.name}`,
+      `Empresas selecionadas (${targetCompanies.length}): ${companyNames}`,
     ],
   };
 
-  // Start execution async — don't await so request returns immediately
-  executeMacro(macro, targetCompanies, 0, 0);
+  simulateExecution(macro, targetCompanies, 0, 0);
 
-  res.json({ success: true, execution: executionState.activeExecution });
+  res.json({ success: true, execution: activeExecution });
 });
 
-app.get("/api/execution", (_req, res) => {
-  res.json(executionState.activeExecution);
-});
-
-// Called by the frontend when proxy_download_captured fires during an execution
-app.post("/api/execution/capture-file", async (req, res) => {
-  const { capturedId } = req.body;
-  const cf = capturedFiles.get(capturedId);
-  if (!cf) return res.status(404).json({ error: "Captured file not found" });
-
-  if (executionState.activeExecution) {
-    const currentCompanies = executionState.activeExecution._resumeState?.targetCompanies;
-    const companyIndex = executionState.activeExecution._resumeState?.companyIndex;
-    const company = currentCompanies?.[companyIndex ?? 0];
-    cf.companyId = company?.id;
-    cf.macroId = executionState.activeExecution.macroId;
-
-    // Persist to DB gallery
-    await db.addFile({
-      id: cf.id,
-      filename: cf.filename,
-      size: cf.data.byteLength,
-      createdAt: cf.capturedAt,
-      companyId: cf.companyId,
-      macroId: cf.macroId,
-      downloadUrl: `/api/captured/${cf.id}`,
-    }).catch((e: Error) => console.error("[File Save Error]", e));
-
-    executionState.activeExecution.logs.push(`📥 PDF capturado: ${cf.filename} (${Math.round(cf.data.byteLength / 1024)} KB)`);
-  }
-
-  res.json({ success: true, filename: cf.filename });
-});
-
-app.post("/api/execution/cancel", (_req, res) => {
-  if (!executionState.activeExecution) return res.status(400).json({ error: "Nenhuma execução ativa" });
-  executionState.activeExecution.status = "cancelled";
-  executionState.activeExecution._resumeState = undefined;
-  executionState.activeExecution.logs.push("🛑 Execução cancelada pelo usuário.");
-  res.json({ success: true });
+app.get("/api/execution", (req, res) => {
+  res.json(activeExecution);
 });
 
 app.post("/api/execution/resolve-captcha", async (req, res) => {
-  if (!executionState.activeExecution || executionState.activeExecution.status !== "paused") {
-    return res.status(400).json({ error: "Nenhuma execução pausada" });
-  }
+  if (activeExecution && activeExecution.status === "paused") {
+    activeExecution.logs.push(`Captcha resolved with: ${req.body.text}`);
+    activeExecution.status = "running";
 
-  const captchaText = req.body.text || "(sem texto)";
-  executionState.activeExecution.logs.push(`✅ Captcha resolvido: ${captchaText}`);
-  executionState.activeExecution.status = "running";
-
-  if (executionState.activeExecution._resumeState) {
-    const { macro, targetCompanies, companyIndex, nextStepIndex } =
-      executionState.activeExecution._resumeState;
-    executionState.activeExecution._resumeState = undefined;
-    // Resume from the step AFTER the captcha_wait (nextStepIndex + 1 was already the next step)
-    executeMacro(macro, targetCompanies, companyIndex, nextStepIndex);
+    if (activeExecution._resumeState) {
+      const { macro, targetCompanies, companyIndex, nextStepIndex } =
+        activeExecution._resumeState;
+      simulateExecution(
+        macro,
+        targetCompanies,
+        companyIndex,
+        nextStepIndex + 1,
+      );
+    } else {
+      const macro = await db.getMacro(activeExecution.macroId);
+      if (macro) {
+        simulateExecution(macro, [], 0, activeExecution.currentStepIndex + 1);
+      }
+    }
+    res.json({ success: true });
   } else {
-    const macro = await db.getMacro(executionState.activeExecution.macroId);
-    if (macro) {
-      const nextStep = executionState.activeExecution.currentStepIndex + 1;
-      executeMacro(macro, [], 0, nextStep);
-    }
-  }
-
-  res.json({ success: true });
-});
-
-
-
-const rewriteCookies = (response, res) => {
-  const setCookie = response.headers.getSetCookie?.() || [];
-  for (const cookie of setCookie) {
-    res.append("Set-Cookie", cookie);
-  }
-};
-
-
-app.all("/api/proxy", async (req, res) => {
-  try {
-    const targetUrl = req.query.url;
-    if (!targetUrl || typeof targetUrl !== 'string' || !targetUrl.startsWith("http")) {
-      return res.status(400).json({error: "Invalid URL"});
-    }
-    
-    const sessionId = (req.query.session as string) || RECORDING_SESSION;
-    const jar = getJar(sessionId);
-    
-    const headers = new Headers(stealthHeaders);
-    for (const [k, v] of Object.entries(req.headers)) {
-      if (!['host', 'referer', 'cookie', 'accept-encoding'].includes(k.toLowerCase()) && typeof v === 'string') {
-        headers.set(k, v);
-      }
-    }
-    const cookieHeader = await cookiesToHeader(jar, targetUrl);
-    if (cookieHeader) headers.set("Cookie", cookieHeader);
-    
-    const fetchOptions: RequestInit = {
-      method: req.method,
-      headers,
-    };
-    
-    if (['POST', 'PUT', 'PATCH'].includes(req.method) && req.body) {
-      if (req.headers["content-type"]?.includes("application/json")) {
-         fetchOptions.body = JSON.stringify(req.body);
-      } else if (req.headers["content-type"]?.includes("application/x-www-form-urlencoded")) {
-         fetchOptions.body = new URLSearchParams(req.body).toString();
-      } else {
-         fetchOptions.body = Buffer.isBuffer(req.body) ? Reflect.get(req, 'rawBody') || req.body : req.body;
-      }
-    }
-    
-    const response = await fetch(targetUrl, fetchOptions);
-    await storeCookies(jar, response, targetUrl);
-    
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    rewriteCookies(response, res);
-    
-    const buffer = await response.arrayBuffer();
-    const contentType = response.headers.get("content-type") || "";
-    res.setHeader("Content-Type", contentType);
-    
-    if (contentType.includes("text/html")) {
-       let html = Buffer.from(buffer).toString("utf-8");
-       
-       const scriptInject = `<script>
-         (function() {
-           function getSelector(el) {
-             if (el.tagName.toLowerCase() == "html") return "HTML";
-             var str = el.tagName.toLowerCase();
-             str += (el.id != "") ? "#" + el.id : "";
-             if (el.className) {
-               var classes = typeof el.className === 'string' ? el.className.trim().split(/\\s+/) : [];
-               for (var i = 0; i < classes.length; i++) {
-                 if (classes[i]) str += "." + classes[i];
-               }
-             }
-             return str;
-           }
-
-           document.addEventListener('click', e => {
-             let selector = getSelector(e.target);
-             window.parent.postMessage({ type: 'recorder_click', selector }, '*');
-             
-             let current = e.target;
-             while(current && current.tagName !== 'A') {
-               current = current.parentNode;
-             }
-             if (current && current.tagName === 'A' && current.href) {
-               e.preventDefault();
-               e.stopPropagation();
-               let href = current.getAttribute('href');
-               if (href && !href.startsWith('javascript:')) {
-                  window.parent.postMessage({ type: 'recorder_navigate', url: current.href }, '*');
-                  window.location.href = '/api/proxy?url=' + encodeURIComponent(current.href) + '&topLevel=true';
-               }
-             }
-           }, true);
-
-           document.addEventListener('change', e => {
-             let selector = getSelector(e.target);
-             window.parent.postMessage({ type: 'recorder_type', selector, value: e.target.value }, '*');
-           }, true);
-         })();
-       </script>`;
-       
-       html = html.replace('</body>', scriptInject + '</body>');
-       
-       // Rewrite resources to go through proxy
-       html = html.replace(/(src|href)=["']([^"']+)["']/g, (match, p1, p2) => {
-          if (p2.startsWith('http')) {
-             return `${p1}="/api/proxy/raw/${p2}"`;
-          }
-          if (p2.startsWith('/')) {
-             const baseUrl = new URL(targetUrl);
-             return `${p1}="/api/proxy/raw/${baseUrl.origin}${p2}"`;
-          }
-          return match;
-       });
-       
-       const baseUrl = new URL(targetUrl);
-       if (!html.includes('<base ')) {
-           html = html.replace('<head>', `<head><base href="${baseUrl.origin}">`);
-       }
-       return res.send(html);
-    }
-    
-    return res.send(Buffer.from(buffer));
-  } catch (e: any) {
-    res.status(500).send(e.message);
+    res.status(400).json({ error: "No paused execution" });
   }
 });
 
-app.all("/api/proxy/raw/*", async (req, res) => {
-  try {
-    const targetUrl = req.originalUrl.replace("/api/proxy/raw/", "");
-    if (!targetUrl.startsWith("http")) return res.status(400).json({error: "Invalid URL"});
-    
-    const sessionId = (req.query.session as string) || RECORDING_SESSION;
-    const jar = getJar(sessionId);
-    
-    const headers = new Headers(stealthHeaders);
-    for (const [k, v] of Object.entries(req.headers)) {
-      if (!['host', 'referer', 'cookie', 'accept-encoding'].includes(k.toLowerCase()) && typeof v === 'string') {
-        headers.set(k, v);
-      }
+function simulateExecution(
+  macro: any,
+  targetCompanies: any[],
+  companyIndex = 0,
+  startIndex = 0,
+) {
+  if (targetCompanies.length > 0 && companyIndex >= targetCompanies.length) {
+    if (activeExecution) {
+      activeExecution.status = "completed";
+      activeExecution.logs.push("✅ Fim da execução para todas as empresas.");
     }
-    const cookieHeader = await cookiesToHeader(jar, targetUrl);
-    if (cookieHeader) headers.set("Cookie", cookieHeader);
-    
-    const fetchOptions: RequestInit = {
-      method: req.method,
-      headers,
+    return;
+  }
+
+  const currentCompany =
+    targetCompanies.length > 0 ? targetCompanies[companyIndex] : null;
+  if (startIndex === 0 && activeExecution && currentCompany) {
+    activeExecution.logs.push(
+      `\n▶️ Iniciando para: ${currentCompany.razaoSocial} (${currentCompany.cnpj})`,
+    );
+  }
+
+  let i = startIndex;
+
+  function next() {
+    if (!activeExecution) return;
+    if (i >= macro.steps.length) {
+      activeExecution.logs.push(`✓ Macro finalizada para a empresa atual.`);
+
+      // Simulação de download interceptado via CDP
+      if (currentCompany) {
+        const fakeFile = {
+          id: uuidv4(),
+          filename: `comprovante_${currentCompany.cnpj ? currentCompany.cnpj.replace(/\D/g, "") : Math.random().toString().slice(2, 8)}.pdf`,
+          size: Math.floor(Math.random() * 500000) + 50000,
+          createdAt: new Date().toISOString(),
+          companyId: currentCompany.id,
+          macroId: macro.id,
+        };
+        db.addFile(fakeFile).catch((e) => console.error(e));
+        activeExecution.logs.push(
+          `📥 Download Concluído: O arquivo ${fakeFile.filename} foi salvo na galeria.`,
+        );
+      }
+
+      simulateExecution(macro, targetCompanies, companyIndex + 1, 0);
+      return;
+    }
+
+    const step = macro.steps[i];
+    activeExecution.currentStepIndex = i;
+
+    let evaluatedValue = step.value;
+    if (evaluatedValue && currentCompany) {
+      evaluatedValue = evaluatedValue
+        .replace(/\{\{CNPJ\}\}/g, currentCompany.cnpj || "")
+        .replace(/\{\{RAZAO_SOCIAL\}\}/g, currentCompany.razaoSocial || "")
+        .replace(/\{\{FANTASIA\}\}/g, currentCompany.nomeFantasia || "")
+        .replace(/\{\{EMAIL\}\}/g, currentCompany.email || "")
+        .replace(/\{\{TELEFONE\}\}/g, currentCompany.telefone || "")
+        .replace(/\{\{IE\}\}/g, currentCompany.inscricaoEstadual || "")
+        .replace(/\{\{IM\}\}/g, currentCompany.inscricaoMunicipal || "");
+    }
+
+    activeExecution.logs.push(
+      `Executing step ${i + 1}: ${step.type} - ${step.selector || ""} ${evaluatedValue ? `(Value: ${evaluatedValue})` : ""}`,
+    );
+
+    activeExecution.currentAction = {
+      type: step.type,
+      selector: step.selector,
+      value: evaluatedValue,
     };
-    
-    if (['POST', 'PUT', 'PATCH'].includes(req.method) && req.body) {
-      if (req.headers["content-type"]?.includes("application/json")) {
-         fetchOptions.body = JSON.stringify(req.body);
-      } else if (req.headers["content-type"]?.includes("application/x-www-form-urlencoded")) {
-         fetchOptions.body = new URLSearchParams(req.body).toString();
-      } else {
-         fetchOptions.body = Buffer.isBuffer(req.body) ? Reflect.get(req, 'rawBody') || req.body : req.body;
-      }
+
+    if (step.type === "navigate" && evaluatedValue) {
+      activeExecution.currentUrl = evaluatedValue;
     }
-    
-    const response = await fetch(targetUrl, fetchOptions);
-    await storeCookies(jar, response, targetUrl);
-    
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    rewriteCookies(response, res);
-    
-    const contentDisposition = response.headers.get("content-disposition") || "";
-    const contentTypeCheck = response.headers.get("content-type") || "";
-    const isDirectDownload = contentDisposition.toLowerCase().includes("attachment") || contentTypeCheck.includes("application/pdf");
-    
-    if (isDirectDownload) {
-      const buffer = await response.arrayBuffer();
-      const data = Buffer.from(buffer);
-      let filename = "arquivo.pdf";
-      const fnMatch = contentDisposition.match(/filename[^;=\n]*=(['\"]?)([^;\n]*)\1/i);
-      if (fnMatch?.[2]) filename = decodeURIComponent(fnMatch[2].replace(/['\"]/g, "").trim());
-      
-      const captured: CapturedFile = {
-        id: uuidv4(),
-        filename,
-        mimeType: contentTypeCheck || "application/pdf",
-        data,
-        capturedAt: new Date().toISOString(),
-        sessionId,
+
+    if (step.type === "captcha_wait") {
+      activeExecution.status = "paused";
+      activeExecution.logs.push(
+        "Paused. Waiting for manual captcha resolution.",
+      );
+      // We would set a screenshot here for real.
+      activeExecution.screenshot =
+        "https://via.placeholder.com/600x200?text=Simulated+Captcha+Screenshot";
+      activeExecution._resumeState = {
+        macro,
+        targetCompanies,
+        companyIndex,
+        nextStepIndex: i,
       };
-      capturedFiles.set(captured.id, captured);
-      
-      res.setHeader("Content-Type", "text/html");
-      return res.send(`<script>window.parent.postMessage({ type: 'PROXY_DOWNLOAD', id: '${captured.id}', filename: '${filename}' }, '*');</script>`);
+      return; // Wait for user to call resolve-captcha
     }
-    
-    const buffer = await response.arrayBuffer();
-    const contentType = response.headers.get("content-type") || "";
-    res.setHeader("Content-Type", contentType);
-    
-    if (contentType.includes("text/html")) {
-       let html = Buffer.from(buffer).toString("utf-8");
-       const baseUrl = new URL(targetUrl);
-       if (!html.includes('<base ')) {
-           html = html.replace('<head>', `<head><base href="${baseUrl.origin}">`);
-       }
-       return res.send(html);
-    }
-    
-    return res.send(Buffer.from(buffer));
-  } catch (e) {
-    sendError(res, e);
+
+    let waitTimeMs = 1500;
+    if (step.type === "wait" && step.waitTime)
+      waitTimeMs = step.waitTime * 1000;
+
+    i++;
+    setTimeout(next, waitTimeMs);
   }
-});
 
-import { runDiagnostics } from './server/diagnostics.ts';
-import { getRemotePage, getSelectorAtPoint, takeRemoteScreenshot } from './server/remote.ts';
+  next();
+}
 
-app.post("/api/remote/start", async (req, res) => {
-  try {
-    const { url } = req.body;
-    const page = await getRemotePage();
-    await page.goto(url, { waitUntil: 'load' });
-    const screenshot = await takeRemoteScreenshot(page);
-    res.json({ success: true, url: page.url(), screenshot });
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.post("/api/remote/click", async (req, res) => {
-  try {
-    const { x, y, viewportWidth, viewportHeight } = req.body;
-    const page = await getRemotePage();
-    
-    // Scale coordinates if the client viewport differs from Playwright's 1280x720
-    const scaleX = 1280 / viewportWidth;
-    const scaleY = 720 / viewportHeight;
-    const pX = Math.round(x * scaleX);
-    const pY = Math.round(y * scaleY);
-    
-    const selector = await getSelectorAtPoint(page, pX, pY);
-    
-    // Check if it's an input
-    const isInput = await page.evaluate(({pX, pY}) => {
-       const el = document.elementFromPoint(pX, pY);
-       return el ? ['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName) : false;
-    }, {pX, pY});
-    
-    await page.mouse.click(pX, pY);
-    // Wait a bit for navigation or state change
-    await page.waitForTimeout(1000);
-    
-    const screenshot = await takeRemoteScreenshot(page);
-    res.json({ success: true, selector, isInput, url: page.url(), screenshot });
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.post("/api/remote/type", async (req, res) => {
-  try {
-    const { selector, text } = req.body;
-    const page = await getRemotePage();
-    await page.locator(selector).fill(text);
-    const screenshot = await takeRemoteScreenshot(page);
-    res.json({ success: true, url: page.url(), screenshot });
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
+// --- FRONTEND ROUTES ---
 async function startServer() {
-  await runDiagnostics();
-  
+  await initDB();
+
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -739,11 +518,13 @@ async function startServer() {
   } else {
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
-    app.get("*", (req, res) => res.sendFile(path.join(distPath, "index.html")));
+    app.get("*", (req, res) => {
+      res.sendFile(path.join(distPath, "index.html"));
+    });
   }
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on port ${PORT}`);
+    console.log(`Server running on http://localhost:${PORT}`);
   });
 }
 

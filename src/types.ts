@@ -15,6 +15,8 @@ export interface Company {
 export interface Certificate {
   id: string;
   filename: string;
+  pfxBase64?: string;
+  passwordEncrypted?: string;
   titular: string;
   cpfCnpj: string;
   serial: string;

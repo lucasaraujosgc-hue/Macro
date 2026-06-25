@@ -108,17 +108,14 @@ export default function Gallery() {
     const zip = new JSZip();
 
     const filesToZip = filteredFiles.filter((f) => selectedFiles.has(f.id));
-    for (const f of filesToZip) {
-      if (f.downloadUrl) {
-        try {
-          const res = await fetch(f.downloadUrl);
-          const blob = await res.blob();
-          zip.file(f.filename, blob);
-        } catch (e) {
-          console.error("Error fetching file for zip:", e);
-        }
-      }
-    }
+    filesToZip.forEach((f) => {
+      // Mocking file content creation for ZIP since real files aren't stored
+      // In a real app we would fetch the file blob and add it to the zip
+      zip.file(
+        f.filename,
+        `Contéudo simulado para o arquivo: ${f.filename}\nEmpresa: ${getCompanyInfo(f.companyId)}\nData: ${f.createdAt}`,
+      );
+    });
 
     const content = await zip.generateAsync({ type: "blob" });
     const url = URL.createObjectURL(content);
@@ -272,14 +269,16 @@ export default function Gallery() {
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
-                    if (file.downloadUrl) {
-                      const a = document.createElement("a");
-                      a.href = file.downloadUrl;
-                      a.download = file.filename;
-                      document.body.appendChild(a);
-                      a.click();
-                      document.body.removeChild(a);
-                    }
+                    const a = document.createElement("a");
+                    const blob = new Blob(
+                      [`Contéudo simulado para: ${file.filename}`],
+                      { type: "text/plain" },
+                    );
+                    a.href = URL.createObjectURL(blob);
+                    a.download = file.filename;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
                   }}
                   className="p-2 bg-white/5 hover:bg-indigo-500/20 text-slate-400 hover:text-indigo-400 rounded-lg transition-colors z-10"
                   title="Baixar Arquivo"
